@@ -1,0 +1,8 @@
+#!/bin/bash
+
+cd /root/bandwidth-1.9.4
+
+numactl --membind=0 ./bandwidth64 --nograph --fastest --nosse2
+echo "Done"
+
+m5 exit

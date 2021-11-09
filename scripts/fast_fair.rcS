@@ -1,0 +1,17 @@
+#!/bin/bash
+
+# Delete old backing file.
+rm -rf /dev/shm/bfile
+
+# Setup tmpfs filesystem at correct mountpoint
+mount -o remount,mpol=interleave:9,10 /dev/shm
+echo never > /sys/kernel/mm/transparent_hugepage/enabled
+export PMEM_IS_PMEM_FORCE=1
+export LD_LIBRARY_PATH=/root/pmdk-1.9/src/nondebug
+
+cd /root/FAST_FAIR/concurrent_pmdk
+echo "Starting"
+numactl --membind=0 ./btree_concurrent -n 24000 -t 4 -p /dev/shm/bfile -m 1
+echo "Done"
+
+m5 exit

@@ -1,0 +1,21 @@
+#!/bin/bash
+
+# Delete old backing file.
+rm -rf /dev/shm/cfile
+
+# Setup tmpfs filesystem at correct mountpoint
+mount -o remount,mpol=interleave:9,10 /dev/shm
+echo never > /sys/kernel/mm/transparent_hugepage/enabled
+export PMEM_IS_PMEM_FORCE=1
+
+cd /root/CCEH/util
+./input_gen 100000
+cp data /root/CCEH/CCEH-PMDK/bin
+
+cd /root/CCEH/CCEH-PMDK
+
+echo "Starting"
+numactl --membind=0 ./bin/multi_threaded_cceh /dev/shm/cfile 100000 4
+echo "Done"
+
+m5 exit

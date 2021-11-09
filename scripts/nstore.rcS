@@ -1,0 +1,19 @@
+#!/bin/bash
+
+# Delete old backing file.
+rm -rf /dev/shm/zfile
+
+# Setup tmpfs filesystem at correct mountpoint
+mount -o remount,mpol=interleave:9,10 /dev/shm
+echo never > /sys/kernel/mm/transparent_hugepage/enabled
+export PMEM_IS_PMEM_FORCE=1
+
+cd /root/whisper
+cd nstore/src/
+echo "Starting"
+
+#m5 checkpoint
+numactl --membind=0 ./nstore -x40000 -k4000 -w -p0.8 -e4 -n0 --ycsb
+echo "Done"
+
+m5 exit

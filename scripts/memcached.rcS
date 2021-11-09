@@ -1,0 +1,24 @@
+#!/bin/bash
+
+# Delete old backing file.
+rm -rf /dev/shm/memcached-tmp
+
+# Setup tmpfs filesystem at correct mountpoint
+mount -o remount,mpol=interleave:9,10 /dev/shm
+echo never > /sys/kernel/mm/transparent_hugepage/enabled
+export PMEM_IS_PMEM_FORCE=1
+
+cd /root/pmdk-memcached/build
+
+export LD_LIBRARY_PATH=/root/pmdk-1.9/src/examples/libpmemobj/hashmap:/root/whisper/mnemosyne-gcc/usermode/library
+
+echo "Starting client"
+numactl --membind=0 /root/whisper/mnemosyne-gcc/usermode/bench/memcached/libmemcached-0.45/clients/memslap -s 127.0.0.1:11211 -c 4 -x 8000 -T 4 -X 64 -F /root/whisper/mnemosyne-gcc/usermode/run.cnf -d 1 &
+
+sleep 0.1
+echo "Starting memcached server"
+numactl --membind=0 ./memcached -u root -p 11211 -l 127.0.0.1 -t 4 -c 4
+
+echo "Done"
+
+m5 exit

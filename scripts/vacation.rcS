@@ -1,0 +1,17 @@
+#!/bin/bash
+
+# Delete old backing file.
+rm -rf /dev/shm/vfile
+
+# Setup tmpfs filesystem at correct mountpoint
+mount -o remount,mpol=interleave:9,10 /dev/shm
+echo never > /sys/kernel/mm/transparent_hugepage/enabled
+export PMEM_IS_PMEM_FORCE=1
+
+cd /root/vacation-pmdk/build
+export LD_LIBRARY_PATH=/root/pmdk-1.9/src/examples/libpmemobj/hashmap
+echo "Starting"
+numactl --membind=0 ./vacation /dev/shm/vfile -c4 -r4000 -t40000 -n1 -q80 -u20
+echo "Done"
+
+m5 exit

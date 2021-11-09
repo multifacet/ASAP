@@ -1,0 +1,14 @@
+#!/bin/bash
+
+# Delete old backing file.
+rm -rf /dev/shm/root
+
+# Setup tmpfs filesystem at correct mountpoint
+mount -o remount,mpol=interleave:9,10 /dev/shm
+echo never > /sys/kernel/mm/transparent_hugepage/enabled
+
+cd /root/Atlas/runtime/build/tests/data_structures
+echo "Starting"
+numactl --membind=0 ./queue_nvm 4 8000 0.5
+echo "Done"
+m5 exit

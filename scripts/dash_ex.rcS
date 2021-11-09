@@ -1,0 +1,17 @@
+#!/bin/bash
+
+# Delete old backing file.
+rm -rf /dev/shm/bench
+
+# Setup tmpfs filesystem at correct mountpoint
+mount -o remount,mpol=interleave:9,10 /dev/shm
+echo never > /sys/kernel/mm/transparent_hugepage/enabled
+export PMEM_IS_PMEM_FORCE=1
+
+cd /root/dash
+echo "Starting"
+# Changed fixed key size to variable
+LD_PRELOAD="./build/pmdk/src/PMDK/src/nondebug/libpmemobj.so.1 ./build/pmdk/src/PMDK/src/nondebug/libpmem.so.1" ./build/test_pmem -n 4000 -loadType 0 -p 40000 -t 4 -k variable -distribution "uniform" -index dash-ex -e 0 -ed 1000 -op "insert" -ps 128
+echo "Done"
+
+m5 exit

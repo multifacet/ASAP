@@ -1,0 +1,18 @@
+#!/bin/bash
+# Delete old backing file.
+rm -rf /dev/shm/efile
+# Setup tmpfs filesystem at correct mountpoint
+mount -o remount,mpol=interleave:9,10 /dev/shm
+echo never > /sys/kernel/mm/transparent_hugepage/enabled
+export PMEM_IS_PMEM_FORCE=1
+
+cd /root/whisper/kv-echo/echo/src
+
+source source-me
+#m5 checkpoint
+#./run.sh --small
+#./evaluation/evaluation --kpvm-dram 1 8 128 1024 8 8 7 10000 1
+#./evaluation/evaluation --kpvm-dram 2 16 128 1024 8 8 7 100000 2
+./evaluation/evaluation --kpvm-dram 4 8 128 1024 1 8 7 10000 4
+#./evaluation/evaluation --kpvm-dram 4 16 128 1024 8 8 7 10000 4
+m5 exit

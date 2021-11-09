@@ -1,0 +1,19 @@
+#!/bin/bash
+
+# Setup tmpfs filesystem at correct mountpoint
+mount -o remount,mpol=interleave:9,10 /dev/shm
+echo never > /sys/kernel/mm/transparent_hugepage/enabled
+
+operations=100000
+workload=masstree
+
+cd /root/RECIPE/index-microbench
+sed -i "s/^recordcount.*/recordcount=${operations}/" workload_spec/workloada
+./generate_all_workloads.sh
+cd ..
+
+source ./scripts/set_vmmalloc.sh
+echo "Starting"
+LD_PRELOAD="/usr/local/lib/libvmmalloc.so.1" ./build/ycsb ${workload} a randint uniform 4 ${operations}
+echo "Done"
+m5 exit
