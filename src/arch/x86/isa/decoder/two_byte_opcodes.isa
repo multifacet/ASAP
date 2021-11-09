@@ -806,21 +806,21 @@
                     0x3: Inst::STMXCSR(Md);
                     0x4: decode LEGACY_DECODEVAL {
                         0x0: xsave();
-                        0x1: Inst::PACQUIRE(M);
-                        0x4: Inst::PRELEASE(M);
+                        0x1: HINT_NOP();
+                        0x4: HINT_NOP();
                         default: xsave();
                     }
                     0x5: xrstor();
                     0x6: decode LEGACY_DECODEVAL {
                         0x0: Inst::UD2();
                         0x1: Inst::CLWB(Mb);
-                        0x4: Inst::OFENCE(Mb);
+                        0x4: HINT_NOP();
                         default: Inst::UD2();
                     }
                     0x7: decode LEGACY_DECODEVAL {
                         0x0: Inst::CLFLUSH(Mb);
                         0x1: Inst::CLFLUSHOPT(Mb);
-                        0x4: Inst::DFENCE(Mb);
+                        0x4: HINT_NOP();
                         default: Inst::CLFLUSH(Mb);
                     }
                 }

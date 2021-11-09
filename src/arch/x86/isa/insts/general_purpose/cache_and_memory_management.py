@@ -91,47 +91,6 @@ def macroop CLWB_P
     clwb t1, seg, riprel, disp, dataSize=1
 };
 
-def macroop OFENCE_M
-{
-    ofence t1, seg, sib, disp, dataSize=1
-};
-
-def macroop OFENCE_P
-{
-    ofence t1, seg, riprel, disp, dataSize=1
-};
-
-def macroop DFENCE_M
-{
-    dfence t1, seg, sib, disp, dataSize=1
-    mfence
-};
-
-def macroop DFENCE_P
-{
-    dfence t1, seg, riprel, disp, dataSize=1
-    mfence
-};
-
-def macroop PACQUIRE_M
-{
-    pacquire t1, seg, sib, disp, dataSize=1
-};
-
-def macroop PACQUIRE_P
-{
-    pacquire t1, seg, riprel, disp, dataSize=1
-};
-
-def macroop PRELEASE_M
-{
-    prelease t1, seg, sib, disp, dataSize=1
-};
-
-def macroop PRELEASE_P
-{
-    prelease t1, seg, riprel, disp, dataSize=1
-};
 '''
 
 #let {{

@@ -45,7 +45,6 @@ enumeration(MemoryRequestType, desc="...") {
   // (These are currently unused!)
   MEMORY_DATA, desc="Data read from memory";
   MEMORY_ACK,  desc="Write to memory acknowledgement";
-  MEMORY_NOTIF, desc="Notify PB about L1 writeback";
 }
 
 

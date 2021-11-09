@@ -246,9 +246,6 @@ AbstractController::serviceMemoryQueue()
         pkt = Packet::createRead(req);
         uint8_t *newData = new uint8_t[req_size];
         pkt->dataDynamic(newData);
-    } else if (mem_msg->getType() == MemoryRequestType_MEMORY_NOTIF) {
-        req->setFlags(Request::NOTIF);
-        pkt = Packet::createWrite(req);
     } else {
         panic("Unknown memory request type (%s) for addr %p",
               MemoryRequestType_to_string(mem_msg->getType()),
@@ -354,8 +351,6 @@ AbstractController::recvTimingResp(PacketPtr pkt)
         (*msg).m_DataBlk.setData(pkt->getPtr<uint8_t>(), 0,
                                  RubySystem::getBlockSizeBytes());
     } else if (pkt->isWrite()) {
-        if (pkt->req->isNotif())
-            assert(0); // shouldn't be receiving response
         (*msg).m_Type = MemoryRequestType_MEMORY_WB;
         (*msg).m_MessageSize = MessageSizeType_Writeback_Control;
     } else {

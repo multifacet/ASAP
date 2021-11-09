@@ -1,5 +1,5 @@
 from m5.params import *
-from m5.objects.AbstractMemory import *
+from AbstractMemory import *
 
 # Enum for memory scheduling algorithms, currently First-Come
 # First-Served and a First-Row Hit then First-Come First-Served
@@ -41,6 +41,10 @@ class PMEMCtrl(AbstractMemory):
     burst_length = Param.Unsigned(64, "Burst lenght (BL) in beats")
 
     channels = Param.Unsigned(1, "Number of channels")
+
+    num_cores = Param.Unsigned(1, "Number of cores connected to the ctrl")
+
+    urt_capacity = Param.Unsigned(64, "Maximum size of Undo Redo Table")
 
     # Is the write request queue persistent?
     pwq = Param.Bool(True, "Is write request queue persistent?")

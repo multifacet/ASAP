@@ -131,6 +131,9 @@ class MemCmd
         InvalidateReq,   // request for address to be invalidated
         InvalidateResp,
         OwnershipLost, // Ownership lost message from directory to PB
+        EpochCompReq,
+        EpochCompResp,
+        UTFullError, // Undo Table full, sending NACK to PB
         NUM_MEM_CMDS
     };
 
@@ -988,6 +991,12 @@ class Packet : public Printable
         return new Packet(req, makeOLCmd(req));
     }
 
+    static PacketPtr
+    createEpochCompletion(const RequestPtr req)
+    {
+        return new Packet(req, MemCmd::EpochCompReq);
+    }
+
     /**
      * clean up packet variables
      */
@@ -1043,6 +1052,15 @@ class Packet : public Printable
 
         this->size = size;
         flags.set(VALID_SIZE);
+    }
+
+    void
+    setUTFullErrorStatus()
+    {
+        assert(needsResponse());
+        assert(isRequest());
+        cmd = MemCmd::UTFullError;
+        flags.clear(EXPRESS_SNOOP);
     }
 
     /**

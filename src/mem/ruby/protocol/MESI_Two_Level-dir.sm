@@ -67,7 +67,7 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
     DMA_READ, desc="A DMA Read memory request";
     DMA_WRITE, desc="A DMA Write memory request";
     CleanReplacement, desc="Clean Replacement in L2 cache";
-    Notif, desc="Request for notification to Mem";
+
   }
 
   // TYPES
@@ -222,8 +222,6 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
           trigger(Event:Data, in_msg.addr, TBEs[in_msg.addr]);
         } else if (in_msg.Type == CoherenceResponseType:ACK) {
           trigger(Event:CleanReplacement, in_msg.addr, TBEs[in_msg.addr]);
-        } else if (in_msg.Type == CoherenceResponseType:MEMORY_NOTIF) {
-            trigger(Event:Notif, in_msg.addr, TBEs[in_msg.addr]);
         } else {
           DPRINTF(RubySlicc, "%s\n", in_msg.Type);
           error("Invalid message");
@@ -314,18 +312,6 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
         out_msg.addr := address;
         out_msg.Type := MemoryRequestType:MEMORY_READ;
         out_msg.Sender := in_msg.Requestor;
-        out_msg.MessageSize := MessageSizeType:Request_Control;
-        out_msg.Len := 0;
-      }
-    }
-  }
-
-  action(qn_notifyMem, "qn", desc="Notify memory about L1 eviction") {
-    peek(responseNetwork_in, ResponseMsg) {
-      enqueue(memQueue_out, MemoryMsg, to_mem_ctrl_latency) {
-        out_msg.addr := address;
-        out_msg.Type := MemoryRequestType:MEMORY_NOTIF;
-        out_msg.Sender := in_msg.Sender;
         out_msg.MessageSize := MessageSizeType:Request_Control;
         out_msg.Len := 0;
       }
@@ -574,8 +560,4 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
     kd_wakeUpDependents;
   }
 
-  transition({I, ID, ID_W, M, IM, MI, M_DRD, M_DRDI, M_DWR, M_DWRI}, Notif) {
-    qn_notifyMem;
-    k_popIncomingResponseQueue;
-  }
 }

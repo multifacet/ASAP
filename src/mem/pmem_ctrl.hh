@@ -18,8 +18,11 @@
 #include "enums/PMemSched.hh"
 #include "enums/PageManage1.hh"
 #include "mem/abstract_mem.hh"
+#include "mem/central_persist_buffer.hh"
 #include "mem/qport.hh"
 #include "params/PMEMCtrl.hh"
+
+#define BLK_SIZE 64
 
 /* Tracks command to be processed next
 */
@@ -27,6 +30,11 @@ enum BusState {
     READ = 0,
     WRITE,
     NONE,
+};
+
+enum URRecordType {
+    UNDO = 0,
+    REDO
 };
 
 
@@ -38,6 +46,10 @@ class PMEMCtrl: public AbstractMemory
 {
 
   private:
+
+    typedef uint64_t timestamp;
+
+    typedef CentralPersistBuffer::SenderInfo SenderInfo;
 
     // Use of queued slave port hides flow control issues,
     // but is this the right approach?
@@ -88,8 +100,10 @@ class PMEMCtrl: public AbstractMemory
      */
     const Tick readLatency;
     const Tick writeLatency;
+
     const Tick readProcessingLatency;
     const Tick writeProcessingLatency;
+
     const Tick frontendLatency;
 
     /**
@@ -105,6 +119,10 @@ class PMEMCtrl: public AbstractMemory
     // Thresholds for deciding when to switch from reads to writes
     uint32_t writeHighThreshold;
     uint32_t writeLowThreshold;
+
+    uint16_t numCores;
+
+    std::vector<bool> nackPkts;
 
     class BurstHelper {
         public:
@@ -164,6 +182,50 @@ class PMEMCtrl: public AbstractMemory
               burstHelper(NULL)
         {}
     };
+
+    class URRecord
+    {
+        public:
+
+        Addr addr;
+
+        uint8_t *data;
+
+        std::vector<bool> mask;
+
+        unsigned size;
+
+        PortID coreID;
+
+        timestamp TS;
+
+        URRecordType type;
+
+        URRecord(PacketPtr pkt, URRecordType _type)
+            : type(_type)
+        {
+            SenderInfo *s = dynamic_cast<SenderInfo *>(pkt->senderState);
+
+            addr = pkt->getAddr();
+            data = new uint8_t[BLK_SIZE];
+            if (type == REDO)
+                memcpy(data, pkt->getConstPtr<uint8_t>(), BLK_SIZE);
+            mask = pkt->getMask();
+            size = pkt->getSize();
+            coreID = s->coreID;
+            TS = s->TS;
+        }
+
+        ~URRecord()
+        {
+            if (data)
+                delete[] data;
+        }
+    };
+
+    std::vector<URRecord *> URTable;
+
+    int URTCapacity;
 
     /**
      * Used for debugging to observe the contents of the queues.
@@ -266,6 +328,9 @@ class PMEMCtrl: public AbstractMemory
      */
     void addToWriteQueue(PacketPtr pkt, unsigned int pktCount);
 
+    void addReadWriteRequest(PacketPtr pkt, unsigned int pktCount,
+                            URRecord *rec);
+
     /**
      * Actually do the PMEM access - based on the latency it
      * will take to service the req, update the packet's "readyTime"
@@ -285,6 +350,7 @@ class PMEMCtrl: public AbstractMemory
      */
     void respond(PacketPtr pkt, Tick queue_delay);
 
+    void handleEpochCompletion(PortID core, timestamp TS);
 
     BusState busState;
 
@@ -366,6 +432,15 @@ class PMEMCtrl: public AbstractMemory
     // Average queue lengths
     Stats::Average avgRdQLen;
     Stats::Average avgWrQLen;
+
+    // Undo Redo Table stats
+    Stats::Scalar totSpecWrites;
+    Stats::Scalar totUndo;
+    Stats::Scalar totRedo;
+    Stats::Scalar totsafeWrAlias;
+    Stats::Scalar totnumCoalesced;
+    Stats::Scalar totRedoUndoAlias;
+    Stats::Histogram urtOccupancy;
 
   public:
 

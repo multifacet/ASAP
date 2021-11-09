@@ -8,6 +8,7 @@
 #include "base/trace.hh"
 #include "debug/Drain.hh"
 #include "debug/PMEM.hh"
+#include "debug/PMEMDebug.hh"
 #include "sim/system.hh"
 
 using namespace std;
@@ -21,7 +22,8 @@ PMEMCtrl::PMEMCtrl(const PMEMCtrlParams* p) :
     readProcessingLatency(64*p->read_bandwidth),
     writeProcessingLatency(64*p->write_bandwidth),
     frontendLatency(p->frontend_latency), burstLength(p->burst_length),
-    channels(p->channels),
+    channels(p->channels), numCores(p->num_cores),
+    URTCapacity(p->urt_capacity),
     nextReqEvent([this]{ processNextReqEvent(); }, name()),
     isBusy(false), memSchedPolicy(p->mem_sched_policy),
     addrMapping(p->addr_mapping), pageMgmt(p->page_policy),
@@ -35,8 +37,12 @@ PMEMCtrl::PMEMCtrl(const PMEMCtrlParams* p) :
     // TODO: Figure out the queue size
     readBufferSize = 16;
     writeBufferSize = 16;
+
     writeHighThreshold = writeBufferSize * p->write_high_thresh_perc/100;
     writeLowThreshold = writeBufferSize * p->write_low_thresh_perc/100;
+
+    nackPkts = std::vector<bool>(numCores, false);
+
     DPRINTF(PMEM, "ReadBufferSize:%" PRIu32 " WriteBufferSize:%" PRIu32 " \n",
             readBufferSize, writeBufferSize);
     DPRINTF(PMEM, "WriteHighThresh:%" PRIu32 " WriteLowThresh:%" PRIu32 " \n",
@@ -45,8 +51,6 @@ PMEMCtrl::PMEMCtrl(const PMEMCtrlParams* p) :
             writeBandwidth, writeLatency);
     DPRINTF(PMEM, "ReadBandwidth::%f ReadLatency:%" PRIu64 " \n",
             readBandwidth, readLatency);
-    DPRINTF(PMEM, "ReadProcLatency:%ld WriteProcLatency:%ld\n", readProcessingLatency,
-            writeProcessingLatency);
 }
 
 void
@@ -326,9 +330,6 @@ PMEMCtrl::addToWriteQueue(PacketPtr pkt, unsigned int pktCount)
 
             writeQueue.push_back(pmem_pkt);
             isInWriteQueue.insert(burstAlign(addr));
-//          Assertion doesn't work if coalescing is turned off,
-//          as isInWriteQueue is unordered set, will merge identical address
-//            assert(writeQueue.size() == isInWriteQueue.size());
 
             // Update stats
             avgWrQLen = writeQueue.size() + writeRespQueue.size();
@@ -367,6 +368,74 @@ PMEMCtrl::addToWriteQueue(PacketPtr pkt, unsigned int pktCount)
 }
 
 void
+PMEMCtrl::addReadWriteRequest(PacketPtr pkt, unsigned int pktCount,
+                            URRecord* rec)
+{
+    assert(pkt->isWrite());
+
+    assert(pktCount != 0);
+    // if the request size is larger than burst size, the pkt is split into
+    // multiple PMEM packets
+    Addr addr = pkt->getAddr();
+    BurstHelper* burst_helper = NULL;
+    for (int cnt = 0; cnt < pktCount; ++cnt) {
+        unsigned size = std::min((addr | (burstLength - 1)) + 1,
+                        pkt->getAddr() + pkt->getSize()) - addr;
+        writePktSize[ceilLog2(size)]++;
+        writeBursts++;
+
+        // Make the burst helper for split packets
+        if (pktCount > 1 && burst_helper == NULL) {
+            DPRINTF(PMEM, "Write to addr %lx translates to %d "
+                    "PMEM requests\n", pkt->getAddr(), pktCount);
+            burst_helper = new BurstHelper(pktCount);
+        }
+
+        PMEMPacket* pmem_pkt = new PMEMPacket(pkt, addr, size);
+        if (hasPWQ) {
+            PacketPtr new_pkt = Packet::createWrite(pkt->req);
+            pmem_pkt->pkt = new_pkt;
+        }
+        pmem_pkt->burstHelper = burst_helper;
+
+        assert(writeQueue.size() < writeBufferSize);
+        //wrQLenPdf[writeQueue.size() + writeRespQueue.size()]++;
+
+        DPRINTF(PMEM, "Adding to write queue\n");
+
+        writeQueue.push_back(pmem_pkt);
+        isInWriteQueue.insert(burstAlign(addr));
+
+        // Update stats
+        avgWrQLen = writeQueue.size() + writeRespQueue.size();
+
+        // Starting address of next PMEM pkt (aligend to burstLength boundary)
+        addr = (addr | (burstLength - 1)) + 1;
+    }
+
+    // If write queue is persistent, we respond immediately. Actual memory
+    // access will be performed later, as per MC scheduling policies.
+    // Any later reads can simply snoop the updated value from the write queue
+    pkt->cmd = MemCmd::SwapReq;
+    access(pkt);
+    pkt->cmd = MemCmd::WriteReq;
+    memcpy(rec->data, pkt->getConstPtr<uint8_t>(), BLK_SIZE);
+    if (hasPWQ && pkt->needsResponse()) {
+        pkt->makeResponse(); // access() makes SwapResp response
+        respond(pkt, 0);
+    }
+
+    // If we are not already scheduled to get a request out of the
+    // queue, do so now
+    if (!writeQueue.empty() && !nextReqEvent.scheduled()) {
+        DPRINTF(PMEM, "Request to be processed immediately\n");
+        busState = WRITE;
+        scheduleWrite();
+//        schedule(nextReqEvent, curTick() + writeLatency);
+    }
+}
+
+void
 PMEMCtrl::printQs() const {
     DPRINTF(PMEM, "===READ QUEUE===\n\n");
     for (auto i = readQueue.begin() ;  i != readQueue.end() ; ++i) {
@@ -386,23 +455,75 @@ PMEMCtrl::printQs() const {
     }
 }
 
+void
+PMEMCtrl::handleEpochCompletion(PortID core, timestamp TS)
+{
+    for (int i=0; i<URTable.size(); i++) {
+        URRecord *del_entry = URTable[i];
+        if (del_entry->coreID == core && del_entry->TS == TS) {
+            // Apply Redo record to Undo
+            if (del_entry->type == REDO) {
+                bool undo_found = false;
+                for (auto record: URTable) {
+                    if (record->addr == del_entry->addr && record->type == UNDO) {
+                        bool overlap = false;
+                        undo_found = true;
+                        totRedoUndoAlias++;
+                        for (int i = 0; i < BLK_SIZE; i++) {
+                            if (del_entry->mask[i]) {
+                                if (del_entry->mask[i] && record->mask[i])
+                                    overlap = true;
+                                record->data[i] = del_entry->data[i];
+                                record->mask[i] = true;
+                            }
+                        }
+                        // Update memory if writing to different part of cacheline
+                        if (!overlap)
+                            undo_found = false;
+                        break;
+                    }
+                }
+                if (!undo_found) {
+                    // TODO: Add to the write queue instead of directly updating
+                    RequestPtr req = std::make_shared<Request>(del_entry->addr,
+                            del_entry->size, 0, 0);
+                    req->setFlags(Request::NVM);
+
+                    PacketPtr pmem_pkt = Packet::createWrite(req);
+                    uint8_t *newData = new uint8_t[BLK_SIZE];
+                    pmem_pkt->dataDynamic(newData);
+                    memcpy(newData, del_entry->data, BLK_SIZE);
+                    pmem_pkt->setMask(del_entry->mask);
+
+                    access(pmem_pkt);
+
+                    pmem_pkt->req.reset();
+                    delete pmem_pkt;
+                }
+            }
+            DPRINTF(PMEMDebug, "Deleted record type=%d Core%d TS=%d Addr:0x%lx\n",
+                    del_entry->type, del_entry->coreID, del_entry->TS, del_entry->addr);
+            delete del_entry;
+            URTable.erase(URTable.begin()+i);
+            i--;
+        }
+    }
+}
 
 bool
 PMEMCtrl::recvTimingReq(PacketPtr pkt)
 {
-    DPRINTF(PMEM, "recvTimingReq: request %s addr %x size %d\n",
-            pkt->cmdString(), pkt->getAddr(), pkt->getSize());
-
-        if (pkt->isOwnershipLost()) {
-                delete pkt;
-                return true;
-        }
+    if (pkt->isOwnershipLost()) {
+            delete pkt;
+            return true;
+    }
 
     panic_if(pkt->cacheResponding(), "Should not see packets where cache "
              "is responding");
 
-    panic_if(!(pkt->isRead() || pkt->isWrite()),
-             "Should only see read and writes at memory controller, "
+    panic_if(!(pkt->isRead() || pkt->isWrite()
+             || pkt->cmd == MemCmd::EpochCompReq),
+             "Should only see reads, writes and EC at memory controller, "
              "saw %s to %#llx\n", pkt->cmdString(), pkt->getAddr());
 
     // Find out how many pmem packets a pkt translates to
@@ -464,6 +585,9 @@ PMEMCtrl::respond(PacketPtr pkt, Tick queue_delay)
     if (pkt->isWrite())
         response_time = curTick() + frontendLatency + pkt->headerDelay +
             pkt->payloadDelay + writeLatency;
+    else if (pkt->cmd == MemCmd::EpochCompResp)
+        response_time = curTick() + pkt->headerDelay + pkt->payloadDelay +
+             writeLatency;
     else {
         if (queue_delay > readLatency)
             response_time = curTick() + frontendLatency + pkt->headerDelay +
@@ -475,9 +599,6 @@ PMEMCtrl::respond(PacketPtr pkt, Tick queue_delay)
     // Here we reset the timing of the packet before sending it out.
     pkt->headerDelay = pkt->payloadDelay = 0;
 
-    // TODO: What is difference between this and respQueue?
-    // queue the packet in the response queue to be sent out after
-    // the static latency has passed
     DPRINTF(PMEM, "Response scheduled for %lu \n", response_time);
     port.schedTimingResp(pkt, response_time);
     DPRINTF(PMEM, "Done\n");
@@ -809,8 +930,7 @@ PMEMCtrl::regStats()
         .name(name() + ".writePktSize")
         .desc("Write request sizes (log2)");
 
-     /*
-    rdQLenPdf
+     /*rdQLenPdf
         .init(readBufferSize)
         .name(name() + ".rdQLenPdf")
         .desc("What read queue length does an incoming req see");
@@ -818,8 +938,7 @@ PMEMCtrl::regStats()
      wrQLenPdf
         .init(writeBufferSize)
         .name(name() + ".wrQLenPdf")
-        .desc("What write queue length does an incoming req see");
-    */
+        .desc("What write queue length does an incoming req see");*/
 
      rdPerTurnAround
          .init(readBufferSize)
@@ -922,6 +1041,34 @@ PMEMCtrl::regStats()
 
     busUtilWrite = avgWrBW / peakWriteBW * 100;
 
+    totSpecWrites
+        .name(name() + ".totalSpecWrites")
+        .desc("Total number of incoming speculative writes");
+
+    totUndo
+        .name(name() + ".totalUndo")
+        .desc("Total number of undo records created");
+
+    totRedo
+        .name(name() + ".totalRedo")
+        .desc("Total number of redo records created");
+
+    totsafeWrAlias
+        .name(name() + ".totsafeWrAlias")
+        .desc("Number of safe writes aliased in URTable");
+
+    totnumCoalesced
+        .name(name() + ".totnumCoalesced")
+        .desc("Number of spec writes coalesced in URTable");
+
+    totRedoUndoAlias
+        .name(name() + ".totRedoUndoAlias")
+        .desc("Number of redo records written onto undo record");
+
+    urtOccupancy
+        .init(URTCapacity+1)
+        .name(name() + ".urtOccupancy")
+        .desc("Number of records in the URTable");
 }
 
 

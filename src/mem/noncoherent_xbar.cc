@@ -50,7 +50,6 @@
 #include "base/trace.hh"
 #include "debug/NoncoherentXBar.hh"
 #include "debug/XBar.hh"
-#include "mem/central_persist_buffer.hh"
 
 NoncoherentXBar::NoncoherentXBar(const NoncoherentXBarParams *p)
     : BaseXBar(p)
@@ -99,25 +98,6 @@ NoncoherentXBar::~NoncoherentXBar()
 bool
 NoncoherentXBar::recvTimingReq(PacketPtr pkt, PortID slave_port_id)
 {
-    if (pkt->isWrite() && pkt->req->isNVM() && !pkt->req->isOFence()
-        && name().find("ruby") != std::string::npos && !pkt->req->isNotif()) {
-        PortID m_port_id = findPort(pkt->getAddrRange());
-        masterPorts[m_port_id]->sendTimingReq(pkt);
-        DPRINTF(NoncoherentXBar, "Dropping PM writeback:%s, xbar:%s, id:%d\n",
-                pkt->print(), name(), slave_port_id);
-        pkt->makeResponse();
-        Tick latency = pkt->headerDelay;
-        pkt->headerDelay = 0;
-        slavePorts[slave_port_id]->schedTimingResp(pkt, curTick()+latency);
-        return true;
-    }
-    else if (pkt->req->isNotif()) {
-        pkt->req.reset();
-        pkt->popSenderState();
-        delete pkt;
-        return true;
-    }
-
     // determine the source port based on the id
     SlavePort *src_port = slavePorts[slave_port_id];
 

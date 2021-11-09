@@ -642,14 +642,6 @@ let {{
                        " | Request::DST_POC")
     defineMicroStoreOp('Clwb', 'Mem = 0;',
                        mem_flags="Request::CLEAN | Request::DST_POC")
-    defineMicroStoreOp('Ofence', 'Mem = 0;',
-                       mem_flags="Request::ORDERING")
-    defineMicroStoreOp('Dfence', 'Mem = 0;',
-                       mem_flags="Request::DURABILITY")
-    defineMicroStoreOp('Pacquire', 'Mem = 0;',
-                       mem_flags="Request::ACQUIRE")
-    defineMicroStoreOp('Prelease', 'Mem = 0;',
-                       mem_flags="Request::RELEASE")
 
     def defineMicroStoreSplitOp(mnemonic, code,
                                 completeCode="", mem_flags="0"):

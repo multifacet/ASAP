@@ -221,7 +221,13 @@ MemCmd::commandInfo[] =
       InvalidCmd, "InvalidateResp" },
     /* OwnershipLost Request */
     { SET2(IsRequest, IsOwnershipLost),
-      InvalidCmd, "OwnershipLost" }
+      InvalidCmd, "OwnershipLost" },
+    /* Epoch Completion Request */
+    { SET3(IsRequest, NeedsResponse, HasData), EpochCompResp, "EpochCompReq" },
+    /* Epoch Completion Response */
+    { SET2(IsResponse, HasData), InvalidCmd, "EpochCompResp" },
+    /* Undo-Redo Table Full Error */
+    { SET3(IsWrite, IsResponse, IsError), InvalidCmd, "UTFullError"}
 };
 
 AddrRange

@@ -164,13 +164,13 @@ Sequencer::wakeup()
             if (current_time - seq_req.issue_time < m_deadlock_threshold)
                 continue;
 
-            /*panic("Possible Deadlock detected. Aborting!\n version: %d "
+            panic("Possible Deadlock detected. Aborting!\n version: %d "
                   "request.paddr: 0x%x m_readRequestTable: %d current time: "
                   "%u issue_time: %d difference: %d\n", m_version,
                   seq_req.pkt->getAddr(), table_entry.second.size(),
                   current_time * clockPeriod(), seq_req.issue_time
                   * clockPeriod(), (current_time * clockPeriod())
-                  - (seq_req.issue_time * clockPeriod()));*/
+                  - (seq_req.issue_time * clockPeriod()));
         }
         total_outstanding += table_entry.second.size();
     }

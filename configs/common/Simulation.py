@@ -431,7 +431,7 @@ def repeatSwitch(testsys, repeat_switch_cpu_list, maxtick, switch_freq):
             exit_event = m5.simulate(maxtick - m5.curTick())
             return exit_event
 
-# Boot with KvmCPU till m5_switch_cpu
+# Boot with KvmCPU till the first m5_checkpoint
 # Warmup: TimingSimpleCPU till work_begin
 # ROI: O3CPU till work_end
 def run_asap(options, root, testsys, cpu_class):

@@ -1,19 +1,17 @@
 #!/bin/bash
 
-pModel=arp
-
-tmux new -d -s hops_$pModel "./run.sh nstore $pModel; read" \;\
-    new-window -d "./run.sh echo $pModel; read" \; next-window \;\
-    new-window -d "./run.sh vacation $pModel; read" \; next-window \;\
-    new-window -d "./run.sh memcached $pModel; read" \; next-window \;\
-    new-window -d "./run.sh atlas_heap $pModel; read" \; next-window \;\
-    new-window -d "./run.sh atlas_queue $pModel; read" \; next-window \;\
-    new-window -d "./run.sh atlas_skiplist $pModel; read" \; next-window \;\
-    new-window -d "./run.sh cceh $pModel; read" \; next-window \;\
-    new-window -d "./run.sh fair $pModel; read" \; next-window \;\
-    new-window -d "./run.sh dash_lh $pModel; read" \; next-window \;\
-    new-window -d "./run.sh dash_ex $pModel; read" \; next-window \;\
-    new-window -d "./run.sh recipe_art $pModel; read" \; next-window \;\
-    new-window -d "./run.sh recipe_clht $pModel; read" \; next-window \;\
-    new-window -d "./run.sh recipe_masstree $pModel; read" \; next-window \;\
+tmux new -d -s baseline './run.sh nstore; read' \;\
+    new-window -d './run.sh echo; read' \; next-window \;\
+    new-window -d './run.sh vacation; read' \; next-window \;\
+    new-window -d './run.sh memcached; read' \; next-window \;\
+    new-window -d './run.sh atlas_heap; read' \; next-window \;\
+    new-window -d './run.sh atlas_queue; read' \; next-window \;\
+    new-window -d './run.sh atlas_skiplist; read' \; next-window \;\
+    new-window -d './run.sh cceh; read' \; next-window \;\
+    new-window -d './run.sh fair; read' \; next-window \;\
+    new-window -d './run.sh dash_lh; read' \; next-window \;\
+    new-window -d './run.sh dash_ex; read' \; next-window \;\
+    new-window -d './run.sh recipe_art; read' \; next-window \;\
+    new-window -d './run.sh recipe_clht; read' \; next-window \;\
+    new-window -d './run.sh recipe_masstree; read' \; next-window \;\
     attach \;

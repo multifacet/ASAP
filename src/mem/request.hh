@@ -202,8 +202,6 @@ class Request
         /** The read request is due to a Write cache Miss */
         WRITE_MISS                  = 0x0000100000000000,
 
-        /** The request is a notification to the PB */
-        NOTIF                       = 0x0000200000000000,
         /**
          * These flags are *not* cleared when a Request object is
          * reused (assigned a new address).
@@ -902,7 +900,6 @@ class Request
     bool isAtomicReturn() const { return _flags.isSet(ATOMIC_RETURN_OP); }
     bool isAtomicNoReturn() const { return _flags.isSet(ATOMIC_NO_RETURN_OP); }
     bool isNVM() const {return _flags.isSet(NVM); }
-    bool isNotif() const {return _flags.isSet(NOTIF); }
     bool isOFence() const {return _flags.isSet(ORDERING); }
     bool isDFence() const {return _flags.isSet(DURABILITY); }
     bool isPMFence() const {return isOFence() || isDFence(); }
