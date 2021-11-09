@@ -384,18 +384,14 @@ def addCommonOptions(parser):
     parser.add_option("--pmem-sc-pol", action="store", type="string",
                       default='writeHigh',
                       help="scheduling policy for PM Controller")
-    parser.add_option("--urt-capacity", action="store", type="int",
-                      default=64,
-                      help="Maximum size of Undo Redo Table")
 
     # Enable Persist Buffers
     parser.add_option("--persistency-model", type="choice",
-                      choices=["epoch", "arp"], default="arp")
+                      choices=["epoch","arp"], default="arp")
     parser.add_option("--persist-buffers", action="store_true", default=False)
     parser.add_option("--pb-capacity", type="int", default=32)
-    parser.add_option("--flush-threshold", type="int", default=2)
-    parser.add_option("--flush-interval", type="int", default=500)
-    parser.add_option("--et-capacity", type="int", default=32)
+    parser.add_option("--flush-threshold", type="int", default=16)
+    parser.add_option("--pb-poll-latency", type="string", default="500ns")
 
 
 def addSEOptions(parser):

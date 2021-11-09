@@ -44,13 +44,13 @@
  */
 
 #include "mem/noncoherent_xbar.hh"
-#include "mem/central_persist_buffer.hh"
 
 #include "string"
 #include "base/logging.hh"
 #include "base/trace.hh"
 #include "debug/NoncoherentXBar.hh"
 #include "debug/XBar.hh"
+#include "mem/central_persist_buffer.hh"
 
 NoncoherentXBar::NoncoherentXBar(const NoncoherentXBarParams *p)
     : BaseXBar(p)
@@ -101,9 +101,10 @@ NoncoherentXBar::recvTimingReq(PacketPtr pkt, PortID slave_port_id)
 {
     if (pkt->isWrite() && pkt->req->isNVM() && !pkt->req->isOFence()
         && name().find("ruby") != std::string::npos && !pkt->req->isNotif()) {
+        PortID m_port_id = findPort(pkt->getAddrRange());
+        masterPorts[m_port_id]->sendTimingReq(pkt);
         DPRINTF(NoncoherentXBar, "Dropping PM writeback:%s, xbar:%s, id:%d\n",
                 pkt->print(), name(), slave_port_id);
-
         pkt->makeResponse();
         Tick latency = pkt->headerDelay;
         pkt->headerDelay = 0;

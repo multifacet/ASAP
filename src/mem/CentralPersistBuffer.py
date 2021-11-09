@@ -17,16 +17,16 @@ class CentralPersistBuffer(ClockedObject):
     memMaster = VectorMasterPort('Vector Master port')
 
     numThreads = Param.Int('4', "Number of threads to snoop on")
-    numMCs = Param.Int('1', "Number of memory controllers in system")
+    numMCs = Param.Int('4', "Number of memory controllers in system")
 
     pModel = Param.String('arp', "Persistency model")
 
     pbCapacity = Param.Int('32', "Maximum size of each per-thread PB")
-    flushThreshold = Param.Int('0', "Flushing threshold for per-thread PBs")
+    flushThreshold = Param.Int('16', "Flushing threshold for per-thread PBs")
 
-    flushInterval = Param.Int('500', "Interval between periodic flushing")
+    flushInterval = Param.Int('2000', "Interval between periodic flushing")
     firstFlushDelay = Param.Int('32', "Time to first flush")
 
+    pollLatency = Param.Latency('500ns', "Polling frequency")
     system = Param.System(Parent.any, "system object")
 
-    etCapacity = Param.Int('32', "Maximum size of each Epoch Table")

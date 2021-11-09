@@ -34,8 +34,9 @@ elif [ "$2" == "epoch" ]
 then
     pModel="epoch"
 else
+    echo $2
     echo "Invalid persistency model"
     exit
 fi
 
-sudo build/X86/gem5.fast -d results/asap_$2/$1 configs/example/fs.py --pmem --pmem-pwq --persist-buffers --pmem-wr-latency=60ns --mem-size=48GB --cpu-type=X86KvmCPU --kernel=/mydata/vmlinux_12 --disk-image=$image --ruby --asap -n $cores --script=scripts/$1.rcS --persistency-model=$pModel
+sudo build/X86/gem5.fast -d results/hops_$2/$1 configs/example/fs.py --pmem --pmem-pwq --persist-buffers --pmem-wr-latency=60ns --mem-size=48GB --cpu-type=X86KvmCPU --kernel=/mydata/vmlinux_12 --disk-image=$image --ruby --asap -n $cores --script=scripts/$1.rcS --persistency-model=$pModel

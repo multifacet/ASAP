@@ -1,5 +1,7 @@
 #include "mem/central_persist_buffer.hh"
 
+#define max_(a,b) a>b?a:b
+
 CentralPersistBuffer*
 CentralPersistBufferParams::create()
 {
@@ -37,6 +39,7 @@ CentralPersistBuffer::recvTimingReq(PacketPtr pkt, PortID idx){
         schedule(regFlushEvent, clockEdge(Cycles(flushInterval)));
         flushingStarted = true;
     }
+
     checkAndMarkNVM(pkt);
 
     if (pkt->isWrite() && idx >= numThreads) { // Writes from Cache to Memory
@@ -53,9 +56,9 @@ CentralPersistBuffer::recvTimingReq(PacketPtr pkt, PortID idx){
                 status = true;
 
                 Addr addr = alignAddr(pkt->getAddr());
-                std::map<Addr, PortID>::iterator it = simpleDir.find(addr);
-                simpleDir.erase(it);
-                assert(it != simpleDir.end());
+                std::map<Addr,PortID>::iterator it = simpleDir.find(addr);
+                if (it != simpleDir.end())
+                    simpleDir.erase(it);
             }
         }
         else { //Volatile accesses pass through
@@ -64,82 +67,66 @@ CentralPersistBuffer::recvTimingReq(PacketPtr pkt, PortID idx){
     }
     else if (pkt->isWrite() && idx < numThreads) {
         //Only catch PM writes from cores to caches
-
-        // Dfence
+        int numEntries = perThreadPBs[idx]->getSize();
+        // DFence
         if (pkt->req->isDFence()) {
             if (pModel.compare("epoch") == 0)
                 useARP = false; // Start using epoch persistency
 
             dfenceTotal++;
-            if (perThreadETs[idx]->serviceDFence(pkt)) {
+            DPRINTF(PersistBuffer, "serviceDFence: NOW! PB%d[%d/%d] \n",
+                    idx, numEntries, pbCapacity);
+            if (perThreadPBs[idx]->getSize() == 0){
+                perThreadPBs[idx]->serviceOFence();
                 if (pkt->needsResponse()) {
                     pkt->makeResponse();
                     slavePorts[idx]->schedTimingResp(pkt, curTick());
                 }
-            } else {
-                if (!perThreadPBs[idx]->flushEvent.scheduled())
-                    schedule(perThreadPBs[idx]->flushEvent, nextCycle());
+            }
+            else {
+                perThreadPBs[idx]->serviceDFence();
+                perThreadPBs[idx]->dfencePkts.push_back(pkt);
+                assert(perThreadPBs[idx]->dfencePkts.size()==1);
             }
             status = true;
         }
         // Ofence
         else if (pkt->req->isOFence()) {
-            if (perThreadETs[idx]->getSize() >= etCapacity) {
-                perThreadETs[idx]->setRetryReq();
-                status = false;
+            ofenceTotal++;
+            perThreadPBs[idx]->serviceOFence();
+            //DPRINTF(PersistBuffer, "serviceOFence: NOW! PB%d[%d/%d] \n",
+            //        idx, numEntries, pbCapacity);
+            if (pkt->needsResponse()) {
+                pkt->makeResponse();
+                slavePorts[idx]->schedTimingResp(pkt, curTick());
             }
-            else {
-                ofenceTotal++;
-                perThreadETs[idx]->serviceOFence();
-                if (pkt->needsResponse()) {
-                    pkt->makeResponse();
-                    slavePorts[idx]->schedTimingResp(pkt, curTick());
-                }
-                status = true;
-            }
+            status = true;
         }
         // Acquire
         else if (pkt->req->isAcquire()) {
             if (useARP) {
                 Addr lockAddr = alignAddr(pkt->getAddr());
                 std::map<Addr, depPair>::iterator itr=lock_map.find(lockAddr);
-
                 DPRINTF(PersistBuffer, "Acquire at core %d, Addr=0x%lx\n", idx, lockAddr);
+
                 // Cross thread dependency exists
-                if (itr != lock_map.end() && (itr->second).first != idx) {
+                if (itr != lock_map.end() && itr->second.first != idx) {
                     int srcCoreID = (itr->second).first;
+                    timestamp srcEpoch = perThreadPBs[srcCoreID]->getCurrentTS() - 1;
+                    DPRINTF(PersistBuffer, "Cross thread dep: Source:%d, %d \
+                            Destination: %d, %d\n", srcCoreID, srcEpoch, idx,
+                            perThreadPBs[idx]->getCurrentTS());
 
-                    if (perThreadETs[idx]->getSize() == etCapacity) {
-                        perThreadETs[idx]->setRetryReq();
-                        status = false;
-                    }
-                    else {
-                        timestamp srcEpoch =
-                            perThreadETs[srcCoreID]->addDepThread(idx);
-                        if (srcEpoch != -1) {
-                            perThreadETs[idx]->createNewEpoch();
-                            perThreadETs[idx]->addCrossThreadDep(srcCoreID, srcEpoch);
-                            interTEpochConflict++;
-                            DPRINTF(PersistBuffer, "Cross thread dep: Source:%d, %d \
-                                Destination: %d, %d\n", srcCoreID, srcEpoch, idx,
-                                perThreadETs[idx]->getCurrentTS());
-                        }
-                        status = true;
-                    }
-                }
-                else {
-                    status = true;
+                    perThreadPBs[idx]->serviceOFence();
+                    perThreadPBs[idx]->addCrossThreadDep(srcCoreID, srcEpoch);
+                    interTEpochConflict++;
                 }
             }
-            else { // Epoch persistency
-                status = true;
-            }
+            status = true;
 
-             if (status) {
-                if (pkt->needsResponse()) {
-                    pkt->makeResponse();
-                    slavePorts[idx]->schedTimingResp(pkt, curTick());
-                }
+            if (pkt->needsResponse()) {
+                pkt->makeResponse();
+                slavePorts[idx]->schedTimingResp(pkt, curTick());
             }
         }
         // Release
@@ -148,37 +135,26 @@ CentralPersistBuffer::recvTimingReq(PacketPtr pkt, PortID idx){
                 Addr lockAddr = alignAddr(pkt->getAddr());
                 DPRINTF(PersistBuffer, "Release at core %d, Addr=0x%lx\n", idx, lockAddr);
 
-                if (perThreadETs[idx]->getSize() == etCapacity) {
-                    perThreadETs[idx]->setRetryReq();
-                    status = false;
-                }
-                else {
-                    // Update the lock map with this thread ID
-                    std::map<Addr, depPair>::iterator itr;
-                    itr = lock_map.find(lockAddr);
-                    if (itr == lock_map.end())
-                        lock_map.insert(std::pair<Addr, depPair>(lockAddr,
-                                depPair(idx, perThreadETs[idx]->getCurrentTS())));
-                    else {
-                        (itr->second).first = idx;
-                        (itr->second).second = perThreadETs[idx]->getCurrentTS();
-                    }
+                // Update the lock map with this thread ID
+                std::map<Addr, depPair>::iterator itr;
+                itr = lock_map.find(lockAddr);
+                if (itr == lock_map.end())
+                    lock_map.insert(std::pair<Addr, depPair>(lockAddr,
+                                depPair(idx, perThreadPBs[idx]->currVecTS[idx])));
+                else
+                    itr->second = depPair{idx,
+                                     perThreadPBs[idx]->currVecTS[idx]};
 
-                    // Create a new epoch
-                    perThreadETs[idx]->createNewEpoch();
-                    status = true;
-                }
+                // Create a new epoch
+                perThreadPBs[idx]->serviceOFence();
             }
-            else { // Epoch persistency
-                status = true;
+            // Send response back
+            if (pkt->needsResponse()) {
+                pkt->makeResponse();
+                slavePorts[idx]->schedTimingResp(pkt, curTick());
             }
 
-            if (status) {
-                if (pkt->needsResponse()) {
-                    pkt->makeResponse();
-                    slavePorts[idx]->schedTimingResp(pkt, curTick());
-                }
-            }
+            status = true;
         }
         else if (pkt->req->isNVM()) { // PM accesses
             if (system->isMemAddr(pkt->getAddr())){
@@ -199,9 +175,11 @@ CentralPersistBuffer::recvTimingReq(PacketPtr pkt, PortID idx){
                        of unaligned accesses spanning two cachelines
                        These are sent as split packets, and sending retry
                        to just one is not handled. */
-                    if (perThreadPBs[idx]->getSize() == pbCapacity) {
+                    if (perThreadPBs[idx]->getSize() >= pbCapacity) {
+                        DPRINTF(PersistBufferDebug, "PB full. Not accepting "
+                                " entries! PB%d[%d/%d] \n", idx, numEntries,
+                                pbCapacity);
                         status = false;
-                        DPRINTF(PersistBuffer, "Core%d: PB stall\n", idx);
                         if (!perThreadPBs[idx]->isStalled()) {
                             perThreadPBs[idx]->stallPB();
                         }
@@ -216,19 +194,26 @@ CentralPersistBuffer::recvTimingReq(PacketPtr pkt, PortID idx){
                         }
                         delete tmp;
                     }
-                    if (perThreadPBs[idx]->getSize() >= flushThreshold) {
+                    if (numEntries >= flushThreshold) {
                         if (!perThreadPBs[idx]->flushEvent.scheduled())
                             schedule(perThreadPBs[idx]->flushEvent,
-                                    nextCycle());
+                                     nextCycle());
                     }
+                    if (!perThreadPBs[idx]->pollGlobalTSEvent.scheduled())
+                        schedule(perThreadPBs[idx]->pollGlobalTSEvent,
+                                nextCycle());
                 }
             }
-            else { // Assumed to be PIO address
+            else {
+                DPRINTF(PersistBufferDebug, "Request address %#x assumed"
+                        " to be a pio address\n", pkt->getAddr());
                 status = masterPorts[idx]->sendTimingReq(pkt);
             }
         }
         else { //Volatile access pass through
             dramAccesses++;
+            DPRINTF(PersistBufferDebug, "recvTimingReq: VM access addr:0x%x"
+                    " value:%x\n", pkt->getAddr(), *(pkt->getPtr<uint8_t>()));
             status = masterPorts[idx]->sendTimingReq(pkt);
         }
     }
@@ -243,7 +228,7 @@ CentralPersistBuffer::recvTimingReq(PacketPtr pkt, PortID idx){
             if (pkt->req->isNVM() &&
                 bufferedAddr.find(alignAddr(pkt->getAddr()))
                 != bufferedAddr.end()) {
-                // TODO: Need to handle early evictions
+                //TODO FIXME, what here? ADD DELAY?? or buffer it
                 status = masterPorts[idx]->sendTimingReq(pkt);
                 missConflict++;
             }
@@ -269,12 +254,14 @@ CentralPersistBuffer::recvTimingReq(PacketPtr pkt, PortID idx){
         status = true;
     }
     else { /* Reads from CPU to cache */
-        if (pkt->req->isNVM() && pkt->isRead())
+        if (pkt->req->isNVM() && pkt->isRead()) {
             pmAccesses++;
+        }
         else if (!pkt->req->isNVM() && pkt->isRead())
             dramAccesses++;
         status = masterPorts[idx]->sendTimingReq(pkt);
     }
+    DPRINTF(PersistBufferDebug, "status=%d\n", status);
     return status;
 
 }
@@ -283,49 +270,28 @@ bool
 CentralPersistBuffer::recvTimingResp(PacketPtr pkt, PortID idx){
     bool status;
 
-    /* Sink PM memory EC and write responses here itself */
-    if (pkt->cmd == MemCmd::EpochCompResp && idx >= numThreads) {
-        SenderInfo *s = dynamic_cast<SenderInfo *>(pkt->senderState);
-        perThreadETs[s->coreID]->
-            handleEpochCompletion(s->TS, (int)idx-numThreads);
+    /* Sink PM memory write responses here itself */
+    if (pkt->req->isNVM() && pkt->isWrite() && idx >= numThreads &&
+        !pkt->req->isPMFence()) {
+        SenderState *s = dynamic_cast<SenderState *>(pkt->senderState);
+        perThreadPBs[s->id]->flushAck(pkt);
         pkt->req.reset();
         delete pkt->popSenderState();
         delete pkt;
         status = true;
-
-        if (!perThreadETs[s->coreID]->ETCycle.scheduled())
-            schedule(perThreadETs[s->coreID]->ETCycle, curTick());
-    }
-    else if (pkt->req->isNVM() && pkt->isWrite() && idx >= numThreads &&
-        !pkt->req->isPMFence()) {
-        SenderInfo *s = dynamic_cast<SenderInfo *>(pkt->senderState);
-
-        if (pkt->cmd == MemCmd::UTFullError) {
-            DPRINTF(PersistBuffer, "Core%d: Received NACK Addr: 0x%lx\n",
-                    s->coreID, pkt->getAddr());
-            perThreadPBs[s->coreID]->handleUTFullError(pkt);
-            pkt->req.reset();
-            delete pkt->popSenderState();
-            delete pkt;
-            status = true;
-        }
-        else {
-            perThreadPBs[s->coreID]->flushAck(pkt);
-
-            pkt->req.reset();
-            delete pkt->popSenderState();
-            delete pkt;
-            status = true;
-        }
     }
     else if (pkt->isWrite() &&
-            idx >= numThreads && pkt->req->isDMA()) { // DMA Write
+            idx >= numThreads && pkt->req->isDMA()) {
+        DPRINTF(PersistBufferDebug, "DMA Write to address range 0x%x:%x\n",
+                pkt->getAddr(), pkt->getAddr()+pkt->getSize());
         status = slavePorts[idx]->sendTimingResp(pkt);
     }
     else {
+        DPRINTF(PersistBufferDebug, "schedTimingResp id:%d Addr:0x%x"
+                " isPMFence:%d\n", idx, pkt->getAddr(), pkt->req->isPMFence());
         status = slavePorts[idx]->sendTimingResp(pkt);
     }
-
+    DPRINTF(PersistBufferDebug, "status=%d\n", status);
     return status;
 }
 
@@ -338,15 +304,15 @@ CentralPersistBuffer::PersistBuffer::checkCrossDependency(PacketPtr pkt)
     if (it != pb.simpleDir.end()) {
         PortID srcCore = it->second;
         if (srcCore != id) {
-            pb.perThreadETs[srcCore]->createNewEpoch(); // Create a new epoch at src
-            timestamp srcEpoch = pb.perThreadETs[srcCore]->addDepThread(id);
+            timestamp srcEpoch = pb.perThreadPBs[srcCore]->getCurrentTS();
+            pb.perThreadPBs[srcCore]->serviceOFence();
             DPRINTF(PersistBuffer, "Cross thread dep: Source:%d, %d \
-                            Destination: %d\n", srcCore, srcEpoch, id);
-            et.createNewEpoch();
-            et.addCrossThreadDep(srcCore, srcEpoch);
+                                Destination: %d\n", srcCore, srcEpoch, id);
+            serviceOFence();
+            addCrossThreadDep(srcCore, srcEpoch);
             pb.interTEpochConflict++;
-            it->second = id; // Update the directory
         }
+        it->second = id; // Update the directory
     }
     else {
         pb.simpleDir.insert(std::pair<Addr,PortID>(addr,id));
@@ -356,19 +322,21 @@ CentralPersistBuffer::PersistBuffer::checkCrossDependency(PacketPtr pkt)
 bool
 CentralPersistBuffer::PersistBuffer::tryCoalescePBEntry(PacketPtr pkt)
 {
+
     bool coalesced = false;
-    timestamp currTS = et.getCurrentTS();
     pbOccupancy.sample(PBEntries.size());
 
+    //Coalesce stores if possible
+    // if not present, no point looking further
     if (pb.bufferedAddr.find(pb.alignAddr(pkt->getAddr()))
             != pb.bufferedAddr.end()) {
-        //Coalesce stores if possible
-        for (auto entry : PBEntries){
-            // Coalesce only if stores are in the same epoch
+        for (auto entry : PBEntries) {
             if (entry->getAddr() == pb.alignAddr(pkt->getAddr())
-                    && entry->getTS() == currTS
-                    && entry->getFlushStatus() != FLUSHED) {
-                coalesced = true;
+                            && !entry->getIsFlushing()) {
+                if (compareVecTS(entry->getVecTS(), currVecTS)) {
+                    coalesced = true;
+                    break;
+                }
             }
         }
     }
@@ -378,22 +346,23 @@ CentralPersistBuffer::PersistBuffer::tryCoalescePBEntry(PacketPtr pkt)
 bool
 CentralPersistBuffer::PersistBuffer::coalescePBEntry(PacketPtr pkt)
 {
-    bool coalesced = false;
-    timestamp currTS = et.getCurrentTS();
-
-    if (pb.bufferedAddr.find(pb.alignAddr(pkt->getAddr()))
-            != pb.bufferedAddr.end()) {
-        //Coalesce stores if possible
-        for (auto entry : PBEntries){
-            // Coalesce only if stores are in the same epoch
-            if (entry->getAddr() == pb.alignAddr(pkt->getAddr())
-                    && entry->getTS() == currTS
-                    && entry->getFlushStatus() != FLUSHED) {
+    bool coalesced;
+    for (auto entry : PBEntries) {
+        if (entry->getAddr() == pb.alignAddr(pkt->getAddr())
+                    && !entry->getIsFlushing()) {
+            if (compareVecTS(entry->getVecTS(), currVecTS)){
+                DPRINTF(PersistBufferDebug, "PB%d ::Coalescing request"
+                        " to addr 0x%x, req size:%d\n",
+                        id, entry->getAddr(), pkt->getSize());
+                DPRINTF(PersistBufferDebug, "PB%d::Old Write Mask%s\n",
+                        id, entry->printMask());
                 pkt->writeDataToBlock(entry->getDataPtr(), BLK_SIZE);
                 entry->setMask(pkt->getOffset(BLK_SIZE),
                                 pkt->getSize());
-                et.numCoalesced++;
-                et.epochEntries++;
+                DPRINTF(PersistBufferDebug, "PB%d::New Write Mask%s\n",
+                        id, entry->printMask());
+                numCoalesced++;
+                epochEntries++;
                 coalesced = true;
                 break;
             }
@@ -405,30 +374,27 @@ CentralPersistBuffer::PersistBuffer::coalescePBEntry(PacketPtr pkt)
 void
 CentralPersistBuffer::PersistBuffer::addPBEntry(PacketPtr pkt)
 {
-    DPRINTF(PersistBuffer, "PB%d: Added entry for addr: 0x%x\n", id, pkt->getAddr());
-    timestamp currTS = et.getCurrentTS();
-    PBEntry *newEntry = new PBEntry(pkt, currTS);
-    newEntry->setMask(pkt->getOffset(BLK_SIZE), pkt->getSize());
+    PBEntry *newEntry = new PBEntry(pkt, currVecTS, id, pb.numThreads);
+    pb.bufferedAddr.insert(pb.alignAddr(pkt->getAddr()));
     PBEntries.push_back(newEntry);
 
-    //Update the bufferedAddr list()
-    pb.bufferedAddr.insert(pb.alignAddr(pkt->getAddr()));
-
-    et.incPendingACKs();
-    unflushedEntries++;
-
-    // Stats
+    epochEntries++;
     pb.entriesInserted++;
-    et.epochEntries++;
+    unflushedEntries++;
+    DPRINTF(PersistBuffer, "addPBEntry: Addr: 0x%lx\n", pkt->getAddr());
 }
 
 void
-CentralPersistBuffer::PersistBuffer::flushPB() {
-    writeType type;
+CentralPersistBuffer::PersistBuffer::flushPB(){
     int mc = -1;
     PBEntry *flushEntry = getOldestUnflushed();
-
     if (flushEntry == NULL) {
+        return;
+    }
+    /* Check we are in the same epoch,
+        else wait for previous epoch to flush completely */
+    if (PBEntries.front()->getTS() != flushEntry->getTS()) {
+        noflushCyclesIntra++;
         return;
     }
 
@@ -445,60 +411,32 @@ CentralPersistBuffer::PersistBuffer::flushPB() {
     }
     assert(mc != -1); // mc cannot be -1
 
-    if (pb.memSaturated[mc-pb.numThreads])
+   if (pb.memSaturated[mc-pb.numThreads])
         return;
 
-    if (et.isFlushSafe(flushEntry->getTS(), mc-pb.numThreads)) {
-        if (flushEntry->getFlushStatus() == NACKED) {
-            type = RETRY;
-            stopSpecFlush = false;
-            et.clearMcSpecMask(flushEntry->getTS(), mc-pb.numThreads);
-            DPRINTF(PersistBuffer, "Core%d Retrying Addr=0x%lx\n", id, flushEntry->getAddr());
-        }
-        else
-            type = SAFE;
-    }
-    else {
-        if (stopSpecFlush) {
-            noflushCycles++;
-            return;
-        }
-        else
-            type = SPECULATIVE;
-    }
-
-    if (type == SPECULATIVE) {
-        if (et.checkMcMask(flushEntry->getTS(), mc-pb.numThreads)) {
-            type = SAFE;
-        }
-    }
-
     RequestPtr req = std::make_shared<Request>(flushEntry->getAddr(),
-            flushEntry->getSize(), 0, pb.masterId);
+                flushEntry->getSize(), 0, pb.masterId);
     req->setFlags(Request::NVM);
 
     PacketPtr pkt = Packet::createWrite(req);
-
     uint8_t *newData = new uint8_t[BLK_SIZE];
     pkt->dataDynamic(newData);
     memcpy(newData, flushEntry->getDataPtr(), BLK_SIZE);
     pkt->setMask(flushEntry->getMask());
 
-    SenderInfo *s = new SenderInfo(id, flushEntry->getTS(), type);
+    SenderState *s = new SenderState(id);
     pkt->pushSenderState(s);
 
     bool flushed = pb.masterPorts[mc]->sendTimingReq(pkt);
     if (flushed) {
-        flushEntry->setFlushStatus(FLUSHED);
+        DPRINTF(PersistBufferDebug, "flushPB: Flushing addr"
+                " 0x%x via memPort%d\n", pkt->getAddr(), mc);
+        flushEntry->setIsFlushing();
         unflushedEntries--;
-        et.setMcWriteMask(flushEntry->getTS(), mc-pb.numThreads);
-        if (type == SPECULATIVE)
-            et.setMcSpecMask(flushEntry->getTS(), mc-pb.numThreads);
-    }
-    else {
+    } else {
         pb.memSaturated[mc-pb.numThreads] = true;
         if (pb.bwSatStart[mc-pb.numThreads] == 0)
-            pb.bwSatStart[mc-pb.numThreads]= curTick();
+            pb.bwSatStart[mc-pb.numThreads] = curTick();
         DPRINTF(PersistBuffer, "BW saturated at MC %d\n", mc);
         pkt->req.reset();
         delete pkt->popSenderState();
@@ -508,52 +446,45 @@ CentralPersistBuffer::PersistBuffer::flushPB() {
 
 void
 CentralPersistBuffer::PersistBuffer::flushAck(PacketPtr pkt){
-
-    timestamp entryTS = -1;
-
-    SenderInfo *s = dynamic_cast<SenderInfo *>(pkt->senderState);
-
-    for (int i=0; i< PBEntries.size(); ++i) {
-        PBEntry *flushEntry = PBEntries[i];
-        if (flushEntry->getAddr() == pkt->getAddr()
-            && flushEntry->getTS() == s->TS
-            && flushEntry->getFlushStatus() == FLUSHED) {
-                entryTS = s->TS;
-                delete flushEntry;
-                PBEntries.erase(PBEntries.begin()+i);
-                pb.entriesFlushed++;
-                break;
-        }
-    }
-
-    et.decPendingACKs(entryTS);
-    if (!et.ETCycle.scheduled())
-        schedule(et.ETCycle, curTick());
+    DPRINTF(PersistBufferDebug, "Flush ack for PB%d, retryWrReq=%d, size=%d,"
+           " threshold=%d\n", id, retryWrReq, PBEntries.size(),
+           0.9 * pb.pbCapacity);
+    /* Doesn't matter which entry is flushed ..*/
+    PBEntry *flushEntry = PBEntries.front();
+    timestamp oldTS = flushEntry->getTS();
+    assert(flushEntry->getIsFlushing());
+    delete flushEntry;
+    PBEntries.pop_front();
+    pb.entriesFlushed++;
 
     // Hack for removing one copy of addr from buffer
-    Addr a =pb.alignAddr(pkt->getAddr());
-    if (pb.bufferedAddr.find(a) != pb.bufferedAddr.end()) {
-        auto location = pb.bufferedAddr.find(
-                pb.alignAddr(pkt->getAddr()));
+    Addr a = pb.alignAddr(pkt->getAddr());
+    auto location = pb.bufferedAddr.find(a);
+    if (location != pb.bufferedAddr.end()) {
         pb.bufferedAddr.erase(location);
-
-        /*
-        auto l2 = pb.bufferedAddr.find(a);
-        if (l2 == pb.bufferedAddr.end()) {
-            auto it = pb.simpleDir.find(a);
-            if (it != pb.simpleDir.end())
-                pb.simpleDir.erase(it);
-            else
-                assert(false);
-        }
-        */
     }
     //Shouldn't be here, if an addr is buffered,
     // it should be present
     else assert(false);
 
-    /* treshold based signalling*/
+    if (PBEntries.size()==0){
+        if (dFenceInProg)
+            respondToDFence();
+
+        // New epoch started but writes not received yet
+        // All epochs till current epoch complete
+        if (oldTS < currVecTS[id]) {
+            pb.globalTS[id] = currVecTS[id] - 1;
+        }
+    }
+    // Youngest entry belongs to next epoch => current epoch complete
+    else if (oldTS != PBEntries.front()->getTS()) {
+        pb.globalTS[id] = PBEntries.front()->getTS() - 1;
+    }
+
     if (retryWrReq) {
+        DPRINTF(PersistBufferDebug, "flushAck:Unblocked! Sending retry request"
+                " to core%d\n", id);
         retryWrReq = false;
         assert(stallStart > 0);
         stallCycles += (curTick() - stallStart);
@@ -562,171 +493,51 @@ CentralPersistBuffer::PersistBuffer::flushAck(PacketPtr pkt){
     }
 }
 
-void CentralPersistBuffer::PersistBuffer::handleUTFullError(PacketPtr pkt)
-{
-    SenderInfo *s = dynamic_cast<SenderInfo *>(pkt->senderState);
-
-    if (!stopSpecFlush) {
-        numNackBursts++;
-        // Stop flushing speculative stores since UT full
-        stopSpecFlush = true;
-    }
-
-    for (auto entry: PBEntries) {
-        if (entry->getAddr() == pkt->getAddr() &&
-            entry->getTS() == s->TS &&
-            entry->getFlushStatus() == FLUSHED) {
-                entry->setFlushStatus(NACKED);
-                break;
-            }
-    }
-    unflushedEntries++;
-
-    if (!flushEvent.scheduled())
-        schedule(flushEvent, pb.nextCycle());
-}
-
 void CentralPersistBuffer::PersistBuffer::processFlushEvent(){
-    if (unflushedEntries) { /* PB has buffered entries waiting to be flushed */
-        flushPB();
-        if (dFenceInProg) {
-            if (unflushedEntries > 0) {
+    if (unflushedEntries > 0) { /* PB has buffered entries waiting to be flushed */
+        timestamp* vecTS = getOldestUnflushed()->getVecTS();
+        /* Safe to flush, as vecTS not ahead of global TS */
+        if (flushOkay(vecTS)) {
+            flushPB();
+        }
+        else { /* Stuck behind other cores, so we initiate flushes for them */
+            noflushCyclesInter++;
+            /* Flushing stuck behind other threads so flush them instead ..*/
+            /*for (int i=0; i<pb.numThreads; i++) {
+                if (vecTS[i]>readGlobalTS[i] && i!=id) {
+                    if (!pb.perThreadPBs[i]->flushEvent.scheduled()) {
+                        schedule(pb.perThreadPBs[i]->flushEvent,
+                                 pb.nextCycle());
+                    }
+                }
+            }*/
+        }
+        //REMEMBER TO CORRECT BELOW STUFF
+        // When flushing becomes async, as the size wont change
+        if (dFenceInProg) { /* service dFence till buffer is emptied */
+            if (unflushedEntries > 0){
+                /* Keep flushing to satisfy dFence */
                 if (!flushEvent.scheduled())
                     schedule(flushEvent, pb.nextCycle());
             }
-        } else if (unflushedEntries >= pb.flushThreshold) {
+        }
+        else if (unflushedEntries >= pb.flushThreshold)  {
+            /* if PB is still over-capacity, keep flushing */
+            DPRINTF(PersistBufferDebug,
+                    "PB%d[%d/%d] Threshold STILL exceeded!"
+                    " Flushing in next Cycle\n",
+                    id, getSize(), pb.pbCapacity);
             if (!flushEvent.scheduled())
                 schedule(flushEvent, pb.nextCycle());
         }
     }
 }
 
-void CentralPersistBuffer::EpochTable::
-        handleEpochCompletion(timestamp TS, PortID mcNum) {
-    for (int i=0; i<epochs.size(); i++) {
-        if (epochs[i]->getTS() == TS) {
-            epochs[i]->clearMcSpecMask(mcNum);
-            // All MCs acknowledged EC, so delete epoch
-            if (!epochs[i]->getHasSpecWrites())
-            {
-                PortID depThread = epochs[i]->dependentThread;
-                if (depThread != -1) {
-                    // send msg to dependent Threads
-                    cpb.perThreadETs[depThread]->addECMsg(coreID, TS);
-                }
-                DPRINTF(PersistBuffer, "Core%d Epoch:%d complete\n", coreID, TS);
-                delete epochs[i];
-                epochs.erase(epochs.begin()+i);
-
-                if (retryPkt) {
-                    cpb.slavePorts[coreID]->sendRetryReq();
-                    retryPkt = false;
-
-                    cpb.perThreadPBs[coreID]->etStallCycles += curTick() -
-                        etStallStart;
-                    etStallStart = 0;
-                }
-            }
-            break;
-        }
+void CentralPersistBuffer::PersistBuffer::pollingGlobalTS() {
+    for (int i = 0; i < pb.numThreads; ++i) {
+        readGlobalTS[i] = pb.globalTS[i];
     }
-}
-
-void CentralPersistBuffer::EpochTable::processETCycle() {
-    //TODO: Send 1 message for all completed epochs
-    for (auto entry: epochs) {
-        if (entry->getPendingACKs() != 0 ||
-            entry->crossThreadDep.first != -1)
-            break;
-        else if (!(entry->getIsFlushing())) {
-            if (entry->getHasSpecWrites()) {
-                entry->setIsFlushing(true);
-
-                std::vector <bool> mask = entry->mcSpecMask;
-                for (int i=0; i<mask.size(); i++) {
-                    if (mask[i]) {
-                        RequestPtr req = std::make_shared<Request>();
-                        PacketPtr pkt = Packet::createEpochCompletion(req);
-                        SenderInfo *s = new SenderInfo(coreID,
-                            entry->getTS(), INVALID);
-                        pkt->pushSenderState(s);
-
-                        cpb.masterPorts[i+cpb.numThreads]->sendTimingReq(pkt);
-                    }
-                    // Stores to same MC become safe because in ordered delivery
-                    safeTS[i] = _max(safeTS[i], entry->getTS() + 1);
-                }
-            }
-            else {
-                if (entry == epochs.front()) {
-                    for (int i=0; i<cpb.numMCs; ++i)
-                        safeTS[i] = _max(safeTS[i], entry->getTS() + 1);
-                    handleEpochCompletion(entry->getTS(), 0);
-                }
-            }
-            //break; // TODO: Need break??
-        }
-    }
-
-    if (dfenceInProg) {
-        if (epochs.size() == 0) {
-            assert(dfenceStart > 0);
-            cpb.perThreadPBs[coreID]->dfenceCycles += curTick() - dfenceStart;
-            dfenceStart = 0;
-            PacketPtr respPkt = dfencePkts.front();
-            if (respPkt->needsResponse())
-                respPkt->makeResponse();
-            bool status = cpb.recvTimingResp(respPkt, coreID);
-            if (status) {
-                dfenceInProg = false;
-                dfencePkts.pop_front();
-                DPRINTF(PersistBuffer, "PB%d: DFENCE complete\n", coreID);
-            } else {
-                DPRINTF(PersistBuffer, "PB%d: DFENCE response failed\n", coreID);
-            }
-        }
-    }
-
-    //if (dfenceInProg) {
-    //    if (!ETCycle.scheduled())
-    //        schedule(ETCycle, cpb.nextCycle());
-    //}
-}
-
-void CentralPersistBuffer::EpochTable::processECEvent() {
-    assert (ecMsgs.size() != 0); // event scheduled only if msg added
-
-    depPair dep = ecMsgs.front();
-    ecMsgs.pop_front();
-    bool entry_found = false;
-    for (auto entry: epochs) {
-        if (entry->crossThreadDep == dep) {
-            entry->crossThreadDep.first = -1;
-            entry_found = true;
-            DPRINTF(PersistBuffer, "Cross thread dep resolved: Source:%d, %d \
-                Destination:%d, %d\n", dep.first, dep.second, coreID, entry->getTS());
-            break;
-        }
-    }
-    // Current epoch dependency resolved
-    if (!entry_found) {
-        if (currentEpoch->crossThreadDep == dep) {
-            currentEpoch->crossThreadDep.first = -1;
-            entry_found = true;
-            DPRINTF(PersistBuffer, "Cross thread dep resolved: Source:%d, %d \
-                Destination: %d, %d\n", dep.first, dep.second, coreID, getCurrentTS());
-        }
-    }
-    assert(entry_found);
-
-
-    if (ecMsgs.size() != 0) {
-        if (!ECEvent.scheduled())
-            schedule(ECEvent, cpb.nextCycle());
-    }
-
-    if (!ETCycle.scheduled())
-        schedule(ETCycle, curTick());
+    schedule(pollGlobalTSEvent, curTick() + pb.pollLatency);
 }
 
 void
@@ -773,7 +584,7 @@ CentralPersistBuffer::regStats()
 
     bwSatCycles
         .name(name() + ".bwSatCycles")
-        .desc("Cycles flushing stopped due to saturated BW");
+        .desc("Number of cycles flushing stopped due to saturated BW");
 }
 
 void
@@ -793,14 +604,8 @@ CentralPersistBuffer::PersistBuffer::regStats()
          .desc("Occupancy of perThread PBs")
          .flags(nonan);
 
-    etOccupancy
-        .init(pb.etCapacity+1)
-        .name(name() + ".etOccupancy")
-        .desc("Occupancy of perThread ETs")
-        .flags(nonan);
-
     wawHits
-         .init(pb.pbCapacity+1)
+         .init(pb.pbCapacity)
          .name(name() + ".wawHits")
          .desc("WAW reuse in an epoch")
          .flags(nozero);
@@ -809,19 +614,15 @@ CentralPersistBuffer::PersistBuffer::regStats()
         .name(name() + ".cyclesStalled")
         .desc("Number of cycles stalled due to full PB");
 
-    etStallCycles
-        .name(name() + ".etStalled")
-        .desc("Number of cycles stalled due to full ET");
-
     dfenceCycles
         .name(name() + ".dfenceStalled")
         .desc("Number of cycles stalled due to dfence");
 
-    noflushCycles
-        .name(name() + ".cyclesBlocked")
+    noflushCyclesIntra
+        .name(name() + ".cyclesBlockedIntra")
         .desc("Number of cycles per PB stalled due to flushing block");
 
-    numNackBursts
-        .name(name() + ".numNackBursts")
-        .desc("Number of times NACK received because of full URT");
+    noflushCyclesInter
+        .name(name() + ".cyclesBlockedInter")
+        .desc("Number of cycles per PB stalled due to flushing block");
 }

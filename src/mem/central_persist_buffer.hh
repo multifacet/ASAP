@@ -4,7 +4,6 @@
 
 #include <sstream>
 #include <unordered_set>
-#include <utility>
 
 #include "base/statistics.hh"
 #include "debug/PersistBuffer.hh"
@@ -22,19 +21,6 @@
 #define _max(X, Y)  ((X) > (Y) ? (X) : (Y))
 
 #define depPair std::pair<PortID, uint64_t>
-
-enum writeType {
-    SAFE = 0,
-    SPECULATIVE,
-    RETRY,
-    INVALID
-};
-
-enum flushStatus {
-    WAITING = 0,
-    FLUSHED,
-    NACKED
-};
 
 class CentralPersistBuffer : public ClockedObject
 {
@@ -65,9 +51,6 @@ class CentralPersistBuffer : public ClockedObject
     /** Maximum size of a per-thread PB */
     int pbCapacity;
 
-    /** Maximum size of a per-thread Epoch Table */
-    int etCapacity;
-
     /** Flushing threshold for each per-thread PB */
     int flushThreshold;
 
@@ -77,15 +60,20 @@ class CentralPersistBuffer : public ClockedObject
     /** Flushing starts only after first recvTimingReq */
     bool flushingStarted;
 
+    /** Interval between reading globalTS **/
+    int pollLatency;
+
     /** Memory bandwidth saturated */
     std::vector<bool> memSaturated;
+
+    /** Map to track dependencies on Acq/Rel **/
+    std::map<Addr, depPair> lock_map;
 
     /* Keeps track of currently buffered addresses,
      * TODO FIXME Need one per PB */
     /* Multiset used as multiple copies of addresses allowed */
     std::unordered_multiset<Addr> bufferedAddr;
 
-    std::map<Addr, depPair> lock_map;
     std::map<Addr, PortID> simpleDir;
 
     /* Flush all PBs! */
@@ -128,11 +116,10 @@ class CentralPersistBuffer : public ClockedObject
      */
     CentralPersistBuffer(Params* params) :
         ClockedObject(params), system(params->system), pModel(params->pModel),
-        useARP(true), numThreads(params->numThreads), numMCs(params->numMCs),
-        masterId(0), pbCapacity(params->pbCapacity), etCapacity(params->etCapacity),
-        flushThreshold(params->flushThreshold),
-        flushInterval(params->flushInterval),
-        flushingStarted(false), regFlushEvent(*this)
+        useARP(false), numThreads(params->numThreads), numMCs(params->numMCs),
+        masterId(0), pbCapacity(params->pbCapacity),
+        flushThreshold(params->flushThreshold), flushInterval(params->flushInterval),
+        flushingStarted(false), pollLatency(params->pollLatency), regFlushEvent(*this)
     {
 
         //CPU SIDE MASTER-SLAVE PORTS
@@ -173,9 +160,7 @@ class CentralPersistBuffer : public ClockedObject
         // PERSIST BUFFERS
         // create the per-core persist buffers, starting at zero
         for (int i = 0; i < numThreads; ++i) {
-            EpochTable* et = new EpochTable(*this, i);
-            perThreadETs.push_back(et);
-            PersistBuffer* pb = new PersistBuffer(*this, *et, i);
+            PersistBuffer* pb = new PersistBuffer(*this, i);
             perThreadPBs.push_back(pb);
             DPRINTF(PersistBuffer, "Instantiated per-thread PBs %s\n",
                     pb->name());
@@ -189,6 +174,13 @@ class CentralPersistBuffer : public ClockedObject
 
         memSaturated = std::vector<bool>(numMCs, false);
         bwSatStart = std::vector<Tick>(numThreads, 0);
+
+    }
+
+    ~CentralPersistBuffer()
+    {
+        if (globalTS)
+        free(globalTS);
     }
 
     Port& getPort(const std::string& if_name,
@@ -212,120 +204,39 @@ class CentralPersistBuffer : public ClockedObject
     inline Addr alignAddr(Addr a)
         { return (a & ~(Addr(BLK_SIZE - 1))); }
 
+    /* Used for printing out packet data */
+    inline std::string printData(uint8_t *data, int size) {
+        std::stringstream dataString;
+        for (int i = 0; i < size; i++){
+            dataString << std::setw(2) << std::setfill('0')
+                << std::hex << "0x" << (int)data[i] << " ";
+            dataString << std::setfill(' ');
+        }
+        dataString << std::dec;
+        return dataString.str();
+    }
+
+    /* Used for printing out packetTS */
+    inline std::string printTS(timestamp* ts) {
+        std::stringstream tsString;
+        for (int i = 0; i < numThreads; i++){
+            tsString << ts[i] << ' ';
+        }
+        return tsString.str();
+    }
+
+
     // State that is stored in packets sent to the memory controller.
-    struct SenderInfo : public Packet::SenderState
+    struct SenderState : public Packet::SenderState
     {
         // Id of the PB from which the flush request originated.
-        PortID coreID;
+        PortID id;
 
-        timestamp TS;
-
-        writeType type;
-
-        SenderInfo(PortID _id)
-            : coreID(_id), TS(0), type(INVALID)
-        {}
-        SenderInfo(PortID _id, timestamp _TS, writeType _type)
-            : coreID(_id), TS(_TS), type(_type)
+        SenderState(PortID _id) : id(_id)
         {}
     };
-
-    void handlePMWriteback(PacketPtr pkt);
 
   private:
-    class ETEntry
-    {
-        public:
-        timestamp TS;
-
-        // ACK count
-        int pendingACKs;
-
-        // Dependence <coreID, epoch>
-        depPair crossThreadDep;
-
-        // MC bit vector
-        std::vector<bool> mcSpecMask;
-        std::vector<bool> mcWriteMask;
-
-        // Dependent threads
-        PortID dependentThread;
-
-        bool isFlushing;
-
-        ETEntry(timestamp TS, int& numMCs)
-            : TS(TS), pendingACKs(0), dependentThread(-1),
-            isFlushing(false)
-        {
-            crossThreadDep = std::make_pair(-1,-1);
-            mcSpecMask = std::vector<bool>(numMCs, false);
-            mcWriteMask = std::vector<bool>(numMCs, false);
-        }
-
-        timestamp getTS()
-        {
-            return TS;
-        }
-
-        void incPendingACKs()
-        {
-            pendingACKs++;
-        }
-
-        void decPendingACKs()
-        {
-            pendingACKs--;
-            assert(pendingACKs >= 0);
-        }
-
-        int getPendingACKs()
-        {
-            return pendingACKs;
-        }
-
-        void setMcSpecMask(int mcOffset)
-        {
-            assert(mcOffset < mcSpecMask.size());
-            mcSpecMask[mcOffset] = true;
-        }
-
-        void clearMcSpecMask(int mcOffset)
-        {
-            assert(mcOffset < mcSpecMask.size());
-            mcSpecMask[mcOffset] = false;
-        }
-
-        void setMcWriteMask(int mcOffset)
-        {
-            assert(mcOffset < mcWriteMask.size());
-            mcWriteMask[mcOffset] = true;
-        }
-
-        void clearMcWriteMask(int mcOffset)
-        {
-            assert(mcOffset < mcWriteMask.size());
-            mcWriteMask[mcOffset] = false;
-        }
-        bool getHasSpecWrites()
-        {
-            for (auto mc: mcSpecMask) {
-                if (mc)
-                    return mc;
-            }
-            return false;
-        }
-
-        void setIsFlushing(bool val)
-        {
-            isFlushing = val;
-        }
-
-        bool getIsFlushing()
-        {
-            return isFlushing;
-        }
-    };
-
     class PBEntry
     {
         /* A pointer to the data being stored. */
@@ -345,32 +256,52 @@ class CentralPersistBuffer : public ClockedObject
         std::vector<bool> writeMask;
 
         // Indicates if flushing has begun for this entry ..
-        flushStatus fStatus;
+        bool isFlushing;
 
         public:
+        /* Vector timestamp associated with the update */
+        timestamp* storeVecTS;
 
-        PBEntry(PacketPtr pkt, timestamp ts)
-            : storeTS(ts), size(0), fStatus(WAITING)
+        PBEntry()
         {
+        }
+
+        PBEntry(PacketPtr pkt, timestamp* ts, PortID id, int numThreads)
+        {
+            storeTS = ts[id];
             // Aligning the address
             addr = pkt->getAddr() - pkt->getOffset(BLK_SIZE);
             // Taken care of by setMask() but need to initialize
+            size = 0;
+            isFlushing = false;
             writeMask = std::vector<bool>(BLK_SIZE, false);
             setMask(pkt->getOffset(BLK_SIZE), pkt->getSize());
             dataPtr = new uint8_t[BLK_SIZE];
             // Writes at correct Offset
             pkt->writeDataToBlock(dataPtr, BLK_SIZE);
+
+            storeVecTS = (timestamp *) malloc(numThreads * sizeof(timestamp));
+            //Vector Timestamp
+            for (int i = 0; i < numThreads; ++i) {
+                storeVecTS[i] = ts[i];
+            }
         }
 
         ~PBEntry()
         {
-            /* Default constructor doesn not allcoate data */
+            /* Default constructor does not allocate data */
             if (dataPtr)
                 delete[] dataPtr;
+            if (storeVecTS)
+                free(storeVecTS);
         }
 
         timestamp getTS(){
             return storeTS;
+        }
+
+        timestamp* getVecTS(){
+            return storeVecTS;
         }
 
         Addr getAddr(){
@@ -410,294 +341,32 @@ class CentralPersistBuffer : public ClockedObject
             return dataPtr;
         }
 
-        flushStatus getFlushStatus() {
-            return fStatus;
-        }
-
-        void setFlushStatus(flushStatus s) {
-            fStatus = s;
-        }
-    };
-
-    class EpochTable : public EventManager
-    {
-        std::deque<ETEntry*> epochs;
-
-        ETEntry* currentEpoch;
-
-        CentralPersistBuffer& cpb;
-
-        PortID coreID;
-
-        // TODO: when to update this
-        std::vector<timestamp> safeTS;
-
-        std::deque<PacketPtr> dfencePkts;
-
-        std::deque<depPair> ecMsgs;
-
-        public:
-
-        bool dfenceInProg;
-        // Stats
-        /* Start time of current dfence */
-        Tick dfenceStart;
-
-        /* Number of writes coalesced in latest epoch */
-        int numCoalesced;
-
-        /* Number of writes in an epoch */
-        int epochEntries;
-
-        /* Set if a packet was rejected due to a full table */
-        bool retryPkt;
-
-        /* Start time of current stall */
-        Tick etStallStart;
-
-        /* Process ET every cycle */
-        // TODO: See if this can be done only after receiving an
-        //       ACK or when cross thread dep resolved.
-        void processETCycle();
-        EventWrapper<EpochTable, &EpochTable::processETCycle>
-        ETCycle;
-
-        void processECEvent();
-        EventWrapper<EpochTable, &EpochTable::processECEvent>
-        ECEvent;
-
-        virtual const std::string name() const {
-            return csprintf("EpochTable%d", coreID);
-        }
-
-        EpochTable(CentralPersistBuffer& _cpb, PortID id)
-            : EventManager(&_cpb), cpb(_cpb), coreID(id),
-              dfenceInProg(false), dfenceStart(0), numCoalesced(0),
-              epochEntries(0), retryPkt(false), etStallStart(0),
-              ETCycle(*this), ECEvent(*this)
+        std::string printData() const
         {
-            safeTS = std::vector<timestamp>(cpb.numMCs, 0);
-            currentEpoch = new ETEntry(0, cpb.numMCs);
-        }
-
-        ~EpochTable()
-        {
-            if (currentEpoch)
-                delete currentEpoch;
-        }
-
-        int getSize()
-        {
-            return epochs.size();
-        }
-
-        void incPendingACKs()
-        {
-            currentEpoch->incPendingACKs();
-        }
-
-        void decPendingACKs(timestamp TS)
-        {
-            if (currentEpoch->TS == TS) {
-                currentEpoch->decPendingACKs();
-            }
-            else {
-                for (auto epoch : epochs) {
-                    if (epoch->TS == TS) {
-                        epoch->decPendingACKs();
-                        break;
-                    }
-                }
-            }
-        }
-
-        timestamp getCurrentTS()
-        {
-            return currentEpoch->TS;
-        }
-
-        void setMcSpecMask(timestamp TS, int mcOffset)
-        {
-            if (currentEpoch->TS == TS)
-                currentEpoch->setMcSpecMask(mcOffset);
-            else {
-                for (auto entry: epochs) {
-                    if (entry->TS == TS)
-                        entry->setMcSpecMask(mcOffset);
-                }
-            }
-        }
-
-        void clearMcSpecMask(timestamp TS, int mcOffset)
-        {
-            if (currentEpoch->TS == TS)
-                currentEpoch->clearMcSpecMask(mcOffset);
-            else {
-                for (auto entry: epochs) {
-                    if (entry->TS == TS)
-                        entry->clearMcSpecMask(mcOffset);
-                }
-            }
-        }
-
-        void setMcWriteMask(timestamp TS, int mcOffset)
-        {
-            if (currentEpoch->TS == TS)
-                currentEpoch->setMcWriteMask(mcOffset);
-            else {
-                for (auto entry: epochs) {
-                    if (entry->TS == TS)
-                        entry->setMcWriteMask(mcOffset);
-                }
-            }
-        }
-        void createNewEpoch()
-        {
-            // Removes noise from the first epoch
-            if (epochEntries > cpb.pbCapacity)
-                epochEntries = cpb.pbCapacity;
-            if (numCoalesced > cpb.pbCapacity)
-                numCoalesced = cpb.pbCapacity;
-            cpb.perThreadPBs[coreID]->epochSize.sample(epochEntries);
-            cpb.perThreadPBs[coreID]->etOccupancy.sample(getSize());
-            cpb.perThreadPBs[coreID]->wawHits.sample(numCoalesced);
-            epochEntries = 0;
-            numCoalesced = 0;
-
-            epochs.push_back(currentEpoch);
-            currentEpoch = new ETEntry(getCurrentTS()+1, cpb.numMCs);
-
-            if (!ETCycle.scheduled())
-                schedule(ETCycle, curTick());
-
-            DPRINTF(PersistBufferDebug, "Core%d new epoch%d\n", coreID, getCurrentTS());
-        }
-
-        void setRetryReq(){
-            retryPkt = true;
-            etStallStart = curTick();
-        }
-
-        bool isFlushSafe(timestamp TS, int mc)
-        {
-            if (TS > safeTS[mc])
-                return false;
-
-            if (TS == getCurrentTS()) {
-                if (currentEpoch->crossThreadDep.first == -1)
-                    return true;
-                else
-                    return false;
-            }
-
-            for (auto entry:epochs) {
-                if (entry->TS == TS) {
-                    if (entry->crossThreadDep.first == -1)
-                        return true;
-                    else
-                        return false;
-                }
-            }
-
-            return false;
-        }
-
-        bool checkMcMask(timestamp TS, int mc)
-        {
-            std::vector<bool> cummMask;
-            cummMask = std::vector<bool>(cpb.numMCs, false);
-
-            bool spec = false;
-
-            for (auto entry: epochs) {
-                if (entry->TS == TS)
-                    break;
-                for (int i=0; i<cummMask.size(); ++i)
-                    cummMask[i] = entry->mcWriteMask[i]?true:false;
-            }
-
-            for (int i=0; i<cummMask.size(); ++i) {
-                if (i != mc)
-                    spec |= cummMask[i];
-            }
-
-            return !spec;
-        }
-
-        void serviceOFence()
-        {
-            createNewEpoch();
-            DPRINTF(PersistBuffer, "PB%d ofence, TS=%d\n", coreID, getCurrentTS());
-        }
-
-        bool serviceDFence(PacketPtr p)
-        {
-            DPRINTF(PersistBuffer, "PB%d dfence\n", coreID);
-            createNewEpoch();
-            if (epochs.size() == 1) {
-                ETEntry *first = epochs.front();
-                if (first->getPendingACKs() == 0 &&
-                    first->crossThreadDep.first == -1) {
-                    if (first->dependentThread != -1)
-                        cpb.perThreadETs[first->dependentThread]->
-                            addECMsg(coreID, first->getTS());
-                    delete epochs.front();
-                    epochs.erase(epochs.begin());
-                    return true;
-                }
-            }
-            dfencePkts.push_back(p);
-            dfenceInProg = true;
-            dfenceStart = curTick();
-            return false;
-        }
-
-        void handleEpochCompletion(timestamp TS, PortID mcNum);
-
-        bool isEpochComplete(timestamp TS)
-        {
-            if (getCurrentTS() == TS)
-                return false;
-            for (auto entry: epochs) {
-                if (entry->TS == TS)
-                    return false;
-            }
-            return true;
-        }
-
-        void addCrossThreadDep(PortID srcCore, timestamp srcTS)
-        {
-            currentEpoch->crossThreadDep = std::make_pair(srcCore, srcTS);
-        }
-
-        timestamp addDepThread(PortID depCore)
-        {
-            if (epochs.size() > 0) {
-                ETEntry *last = epochs.back();
-                if (last->dependentThread == -1) {
-                    last->dependentThread = depCore;
-                    return last->getTS();
+            std::stringstream dataStr;
+            for (int i = 0; i < BLK_SIZE; i++) {
+                if (writeMask[i]) {
+                    dataStr << std::setw(2) << std::setfill('0') << std::hex
+                            << "0x" << (int)dataPtr[i] << " ";
+                    dataStr << std::setfill(' ');
                 }
                 else {
-                    currentEpoch->dependentThread = depCore;
-                    createNewEpoch();
-                    DPRINTF(PersistBuffer, "Epoch dependency collision\n");
-                    return getCurrentTS() - 1;
+                    dataStr << " - ";
                 }
             }
-
-            return -1;
+            dataStr << std::dec ;
+            return dataStr.str();
         }
 
-        void addECMsg(PortID srcCore, timestamp TS)
-        {
-            ecMsgs.push_back(std::make_pair(srcCore, TS));
-
-            if (!ECEvent.scheduled())
-                // TODO: add delay to the message
-                schedule(ECEvent, cpb.nextCycle());
+        bool getIsFlushing() {
+            return isFlushing;
         }
-    };
+
+        void setIsFlushing() {
+            isFlushing = true;
+        }
+
+   };
 
     class PersistBuffer : public EventManager
     {
@@ -710,11 +379,14 @@ class CentralPersistBuffer : public ClockedObject
         /* Need a pointer to this for initiating mem WBs*/
         CentralPersistBuffer& pb;
 
-        /* Pointer to the Epoch Table */
-        EpochTable& et;
-
         /* Using PortID to identify owner (core) */
         PortID id;
+
+        /* Number of writes coalesced in latest epoch */
+        int numCoalesced;
+
+        /* Number of pbEntries in latest epoch */
+        int epochEntries;
 
         public:
 
@@ -726,12 +398,14 @@ class CentralPersistBuffer : public ClockedObject
         /* List of all dFence packets currently being served */
         std::deque<PacketPtr> dfencePkts;
 
-        /* Flush all PBs! */
+        /* Flush PB! */
         void processFlushEvent();
         EventWrapper<PersistBuffer, &PersistBuffer::processFlushEvent>
         flushEvent;
 
-        bool stopSpecFlush;
+        void pollingGlobalTS();
+        EventWrapper<PersistBuffer, &PersistBuffer::pollingGlobalTS>
+        pollGlobalTSEvent;
 
         /* Statistics to be tracked per buffer*/
 
@@ -740,9 +414,6 @@ class CentralPersistBuffer : public ClockedObject
 
         /* Number of entries per PB */
         Stats::Histogram pbOccupancy;
-
-        /* Number of entries per ET */
-        Stats::Histogram etOccupancy;
 
         /* WAW reuse within epochs */
         Stats::Histogram wawHits;
@@ -754,22 +425,47 @@ class CentralPersistBuffer : public ClockedObject
         Stats::Scalar stallCycles;
 
         /* Number of stalled cycles without flushing */
-        Stats::Scalar noflushCycles;
+        Stats::Scalar noflushCyclesIntra;
+        Stats::Scalar noflushCyclesInter;
 
-        /* Number of stalled cycles without flushing */
-        Stats::Scalar etStallCycles;
+        /* Current vector timestamp? */
+        timestamp* currVecTS;
 
-        /* Number of Nack bursts */
-        Stats::Scalar numNackBursts;
+        /* Copy of globalTS read periodically */
+        timestamp* readGlobalTS;
 
         /* Start time of current stall */
         Tick stallStart;
 
-        PersistBuffer(CentralPersistBuffer& pb, EpochTable& et, PortID id) :
-            EventManager(&pb), unflushedEntries(0), pb(pb), et(et), id(id),
-            dFenceInProg(false), retryWrReq(false),
-            flushEvent(*this), stopSpecFlush(false), stallStart(0)
+        /* Start time of current dfence */
+        Tick dfenceStart;
+
+        PersistBuffer(CentralPersistBuffer& pb, PortID id) :
+            EventManager(&pb), unflushedEntries(0), pb(pb), id(id),
+            numCoalesced(0), epochEntries(0), dFenceInProg(false),
+            retryWrReq(false), flushEvent(*this), pollGlobalTSEvent(*this),
+            stallStart(0)
         {
+            currVecTS = (timestamp *) malloc(pb.numThreads*sizeof(timestamp));
+            //Vector Timestamp
+            for (int i = 0; i < pb.numThreads; ++i) {
+                currVecTS[i] = 0;
+            }
+            currVecTS[id] = 1;
+
+            readGlobalTS = (timestamp *) malloc(pb.numThreads*sizeof(timestamp));
+            for (int i = 0; i < pb.numThreads; ++i) {
+                readGlobalTS[i] = -1;
+            }
+            readGlobalTS[id] = 0;
+        }
+
+        ~PersistBuffer()
+        {
+            if (currVecTS)
+                free(currVecTS);
+            if (readGlobalTS)
+                free(readGlobalTS);
         }
 
         virtual const std::string name() const {
@@ -778,8 +474,6 @@ class CentralPersistBuffer : public ClockedObject
 
         void regStats();
 
-
-        /* returns 1 if A > B, 0 if A == B, -1 if A<B  TODO */
         /* return true if A == B */
         bool compareVecTS(timestamp* tsA, timestamp* tsB) {
             for (int i = 0; i < pb.numThreads; i++) {
@@ -808,8 +502,7 @@ class CentralPersistBuffer : public ClockedObject
 
         PBEntry* getOldestUnflushed(){
             for (auto entry : PBEntries){
-                if (entry->getFlushStatus() == WAITING ||
-                     entry->getFlushStatus() == NACKED)
+                if (!entry->getIsFlushing())
                     return entry;
             }
             return NULL;
@@ -820,29 +513,85 @@ class CentralPersistBuffer : public ClockedObject
             return id;
         }
 
+        timestamp getCurrentTS() {
+            return currVecTS[id];
+        }
+
         bool isStalled(){
             return retryWrReq;
         }
 
         void stallPB(){
-            retryWrReq = true;
+            setRetryReq();
             stallStart = curTick();
+        }
+
+        void setRetryReq(){
+            retryWrReq = true;
+        }
+
+        /* Figure out if flushing is allowed for this epoch */
+        inline bool flushOkay(timestamp* TS) {
+            for (int i=0; i<pb.numThreads; i++) {
+                /* All other positions of TS have to be <= globalTS */
+                if (TS[i]>readGlobalTS[i] && i!=id)
+                    return false;
+            }
+            return true;
+        }
+
+        void serviceOFence(){
+            if (PBEntries.size() == 0)
+                pb.globalTS[id] = currVecTS[id];
+
+            currVecTS[id]++;
+
+            DPRINTF(PersistBuffer, "Core%d OFence TS=%d\n", id, getCurrentTS());
+            /* Update and clear all stats at the end of the epoch! */
+            if (epochEntries > pb.pbCapacity)
+                epochEntries = pb.pbCapacity;
+            epochSize.sample(epochEntries);
+            wawHits.sample(numCoalesced);
+            numCoalesced = 0;
+            epochEntries = 0;
+        }
+
+        void serviceDFence(){
+            dFenceInProg = true;
+            dfenceStart = curTick();
+
+            if (!flushEvent.scheduled())
+                schedule(flushEvent, pb.nextCycle());
+        }
+
+        void respondToDFence()
+        {
+            assert(dfenceStart > 0);
+            dfenceCycles += (curTick() - dfenceStart);
+            dfenceStart = 0;
+            dFenceInProg = false;
+            serviceOFence();
+            while (dfencePkts.size()>0) {
+                DPRINTF(PersistBuffer, "PB%d DFence completed! Epoch=%d\n", id, currVecTS[id]-1);
+                PacketPtr respPkt = dfencePkts.front();
+                respPkt->makeResponse();
+                DPRINTF(PersistBufferDebug, "respondToDFence id:%d Addr:0x%x"
+                        "isPMFence:%d\n", id, respPkt->getAddr(),
+                        respPkt->req->isPMFence());
+                if (!pb.recvTimingResp(respPkt, id))
+                    assert(0); // We don't have code to handle failure
+                dfencePkts.pop_front();
+            }
+        }
+
+        void addCrossThreadDep(PortID srcCore, timestamp TS)
+        {
+            currVecTS[srcCore] = TS;
         }
 
         void flushPB();
 
         void flushAck(PacketPtr pkt);
-
-        void handleUTFullError(PacketPtr pkt);
-
-        bool findAddr(Addr addr)
-        {
-            for (auto entry: PBEntries) {
-                if (entry->getAddr() == addr)
-                    return true;
-            }
-            return false;
-        }
     };
 
     class PBMasterPort : public MasterPort
@@ -965,9 +714,6 @@ class CentralPersistBuffer : public ClockedObject
     /* Per-thread Persist Buffers */
     std::vector<PersistBuffer *> perThreadPBs;
 
-    /* Per-thread Epoch Tables */
-    std::vector<EpochTable *> perThreadETs;
-
     /* Latest global timestamp*/
     timestamp* globalTS;
 
@@ -1013,11 +759,8 @@ class CentralPersistBuffer : public ClockedObject
             assert (bwSatStart[idx-numThreads] > 0);
             bwSatCycles += (curTick() - bwSatStart[idx-numThreads]);
             bwSatStart[idx-numThreads] = 0;
-            for (int i = 0; i < numThreads; ++i) {
-                if (!perThreadPBs[i]->flushEvent.scheduled()) {
-                    schedule(perThreadPBs[i]->flushEvent, nextCycle());
-                }
-            }
+            if (!regFlushEvent.scheduled())
+                schedule(regFlushEvent, clockEdge(Cycles(flushInterval)));
         }
     }
 
