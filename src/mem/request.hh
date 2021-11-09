@@ -172,11 +172,12 @@ class Request
         SECURE                      = 0x10000000,
         /** The request is a page table walk */
         PT_WALK                     = 0x20000000,
-
         /** The request invalidates a memory location */
         INVALIDATE                  = 0x0000000100000000,
         /** The request cleans a memory location */
         CLEAN                       = 0x0000000200000000,
+        /** The request is a clflush/clflushopt */
+        FLUSH                       = 0x0000000400000000,
 
         /** The request targets the point of unification */
         DST_POU                     = 0x0000001000000000,
@@ -899,6 +900,7 @@ class Request
     bool isKernel() const { return _flags.isSet(KERNEL); }
     bool isAtomicReturn() const { return _flags.isSet(ATOMIC_RETURN_OP); }
     bool isAtomicNoReturn() const { return _flags.isSet(ATOMIC_NO_RETURN_OP); }
+    bool isFlush() const { return _flags.isSet(FLUSH); }
     bool isNVM() const {return _flags.isSet(NVM); }
     bool isOFence() const {return _flags.isSet(ORDERING); }
     bool isDFence() const {return _flags.isSet(DURABILITY); }

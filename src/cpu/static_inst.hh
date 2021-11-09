@@ -202,6 +202,7 @@ class StaticInst : public RefCounted, public StaticInstFlags
     bool isFirstMicroop() const { return flags[IsFirstMicroop]; }
     //This flag doesn't do anything yet
     bool isMicroBranch() const { return flags[IsMicroBranch]; }
+    bool isFlush() const { return flags[IsFlush]; }
     //@}
 
     void setFirstMicroop() { flags[IsFirstMicroop] = true; }

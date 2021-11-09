@@ -559,5 +559,4 @@ machine(MachineType:Directory, "MESI Two Level directory protocol")
     l_popMemQueue;
     kd_wakeUpDependents;
   }
-
 }

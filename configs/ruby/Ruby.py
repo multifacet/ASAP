@@ -103,8 +103,7 @@ def setup_memory_controllers(system, ruby, dir_cntrls, options):
             numMCs=len(system.mem_ranges)*len(dir_cntrls),
             pbCapacity = options.pb_capacity,
             flushThreshold = options.flush_threshold,
-            flushInterval = options.flush_interval,
-            etCapacity = options.et_capacity)
+            pollLatency = options.pb_poll_latency)
     if options.numa_high_bit:
         dir_bits = int(math.log(options.num_dirs, 2))
         intlv_size = 2 ** (options.numa_high_bit - dir_bits + 1)
@@ -141,8 +140,6 @@ def setup_memory_controllers(system, ruby, dir_cntrls, options):
                     mem_ctrl.elided_write = options.pmem_elided_write
                     mem_ctrl.mem_sched_policy = options.pmem_sc_pol
                     mem_ctrl.channels = options.mem_channels
-                    mem_ctrl.num_cores = options.num_cpus
-                    mem_ctrl.urt_capacity = options.urt_capacity
                 else:
                     mem_type = ObjectList.mem_list.get(options.mem_type)
                     mem_ctrl = MemConfig.create_mem_ctrl(mem_type, r, index,

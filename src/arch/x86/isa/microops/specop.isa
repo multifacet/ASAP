@@ -257,3 +257,33 @@ let {{
     decoder_output += MicroFenceOpConstructor.subst(iop)
     exec_output += BasicExecute.subst(iop)
 }};
+
+let {{
+    class SfenceOp(X86Microop):
+        def __init__(self):
+            self.className = "Sfence"
+            self.mnemonic = "sfence"
+            self.instFlags = "| (1ULL << StaticInst::IsWriteBarrier)"
+
+        def getAllocator(self, microFlags):
+            allocString = '''
+                    (StaticInstPtr)(new %(class_name)s(machInst,
+                        macrocodeBlock, %(flags)s))
+            '''
+            allocator = allocString % {
+                "class_name" : self.className,
+                "mnemonic" : self.mnemonic,
+                "flags" : self.microFlagsText(microFlags) + self.instFlags}
+            return allocator
+
+    microopClasses["sfence"] = SfenceOp
+}};
+
+let {{
+    # Build up the all register version of this micro op
+    iop = InstObjParams("sfence", "Sfence", 'X86MicroopBase',
+            {"code" : ""})
+    header_output += MicroFenceOpDeclare.subst(iop)
+    decoder_output += MicroFenceOpConstructor.subst(iop)
+    exec_output += BasicExecute.subst(iop)
+}};

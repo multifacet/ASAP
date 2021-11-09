@@ -98,6 +98,7 @@ NoncoherentXBar::~NoncoherentXBar()
 bool
 NoncoherentXBar::recvTimingReq(PacketPtr pkt, PortID slave_port_id)
 {
+
     // determine the source port based on the id
     SlavePort *src_port = slavePorts[slave_port_id];
 

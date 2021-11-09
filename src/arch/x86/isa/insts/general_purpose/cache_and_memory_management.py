@@ -58,26 +58,26 @@ def macroop PREFETCH_T0_P
 
 def macroop CLFLUSH_M
 {
-    clflushopt t0, seg, sib, disp, dataSize=1
+    st t1, seg, sib, disp, dataSize=1, flush=True
     mfence
 };
 
 def macroop CLFLUSH_P
 {
     rdip t7
-    clflushopt t0, seg, riprel, disp, dataSize=1
+    st t1, seg, riprel, disp, dataSize=1, flush=True
     mfence
 };
 
 def macroop CLFLUSHOPT_M
 {
-    clflushopt t0, seg, sib, disp, dataSize=1
+    st t1, seg, sib, disp, dataSize=1, flush=True
 };
 
 def macroop CLFLUSHOPT_P
 {
     rdip t7
-    clflushopt t0, seg, riprel, disp, dataSize=1
+    st t1, seg, riprel, disp, dataSize=1, flush=True
 };
 
 def macroop CLWB_M
@@ -91,6 +91,47 @@ def macroop CLWB_P
     clwb t1, seg, riprel, disp, dataSize=1
 };
 
+def macroop OFENCE_M
+{
+    ofence t1, seg, sib, disp, dataSize=1
+};
+
+def macroop OFENCE_P
+{
+    ofence t1, seg, riprel, disp, dataSize=1
+};
+
+def macroop DFENCE_M
+{
+    dfence t1, seg, sib, disp, dataSize=1
+    mfence
+};
+
+def macroop DFENCE_P
+{
+    dfence t1, seg, riprel, disp, dataSize=1
+    mfence
+};
+
+def macroop PACQUIRE_M
+{
+    pacquire t1, seg, sib, disp, dataSize=1
+};
+
+def macroop PACQUIRE_P
+{
+    pacquire t1, seg, riprel, disp, dataSize=1
+};
+
+def macroop PRELEASE_M
+{
+    prelease t1, seg, sib, disp, dataSize=1
+};
+
+def macroop PRELEASE_P
+{
+    prelease t1, seg, riprel, disp, dataSize=1
+};
 '''
 
 #let {{

@@ -42,10 +42,6 @@ class PMEMCtrl(AbstractMemory):
 
     channels = Param.Unsigned(1, "Number of channels")
 
-    num_cores = Param.Unsigned(1, "Number of cores connected to the ctrl")
-
-    urt_capacity = Param.Unsigned(64, "Maximum size of Undo Redo Table")
-
     # Is the write request queue persistent?
     pwq = Param.Bool(True, "Is write request queue persistent?")
 

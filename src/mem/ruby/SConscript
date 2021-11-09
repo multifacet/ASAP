@@ -42,6 +42,7 @@ Import('*')
 if env['PROTOCOL'] == 'None':
     Return()
 
+DebugFlag('Flush')
 DebugFlag('ProtocolTrace')
 DebugFlag('RubyCache')
 DebugFlag('RubyCacheTrace')

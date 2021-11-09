@@ -45,6 +45,7 @@
 #include "base/logging.hh"
 #include "base/str.hh"
 #include "cpu/testers/rubytest/RubyTester.hh"
+#include "debug/Flush.hh"
 #include "debug/LLSC.hh"
 #include "debug/MemoryAccess.hh"
 #include "debug/ProtocolTrace.hh"
@@ -508,7 +509,7 @@ Sequencer::hitCallback(SequencerRequest* srequest, DataBlock& data,
     if (RubySystem::getWarmupEnabled()) {
         data.setData(pkt->getConstPtr<uint8_t>(),
                      getOffset(request_address), pkt->getSize());
-    } else if (!pkt->isFlush()) {
+    } else if (!pkt->req->isFlush()) {
         if ((type == RubyRequestType_LD) ||
             (type == RubyRequestType_IFETCH) ||
             (type == RubyRequestType_RMW_Read) ||
@@ -627,7 +628,11 @@ Sequencer::makeRequest(PacketPtr pkt)
             //
             // Note: M5 packets do not differentiate ST from RMW_Write
             //
-            primary_type = secondary_type = RubyRequestType_ST;
+            if (pkt->req->isFlush()) {
+                primary_type = secondary_type = RubyRequestType_FLUSH;
+            } else {
+                primary_type = secondary_type = RubyRequestType_ST;
+            }
         } else if (pkt->isRead()) {
             if (pkt->req->isInstFetch()) {
                 primary_type = secondary_type = RubyRequestType_IFETCH;
@@ -646,7 +651,7 @@ Sequencer::makeRequest(PacketPtr pkt)
                     primary_type = secondary_type = RubyRequestType_LD;
                 }
             }
-        } else if (pkt->isFlush()) {
+        } else if (pkt->req->isFlush()) {
           primary_type = secondary_type = RubyRequestType_FLUSH;
         } else {
             panic("Unsupported ruby packet type\n");
@@ -654,7 +659,7 @@ Sequencer::makeRequest(PacketPtr pkt)
     }
 
     // Check if the line is blocked for a Locked_RMW
-    // TODO: Need to find a better way to fix the deadlock problem
+    // TODO: Need to debug this issue and find a better fix
     /*if (m_controller->isBlocked(makeLineAddress(pkt->getAddr())) &&
         (primary_type != RubyRequestType_Locked_RMW_Write)) {
         // Return that this request's cache line address aliases with
@@ -696,7 +701,7 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
     // requests do not
     std::shared_ptr<RubyRequest> msg =
         std::make_shared<RubyRequest>(clockEdge(), pkt->getAddr(),
-                                      pkt->isFlush() ?
+                                      pkt->req->isFlush() ?
                                       nullptr : pkt->getPtr<uint8_t>(),
                                       pkt->getSize(), pc, secondary_type,
                                       RubyAccessMode_Supervisor, pkt,
@@ -707,7 +712,11 @@ Sequencer::issueRequest(PacketPtr pkt, RubyRequestType secondary_type)
             printAddress(msg->getPhysicalAddress()),
             RubyRequestType_to_string(secondary_type));
 
-    Tick latency = cyclesToTicks(
+    Tick latency = 0;
+    if (pkt->req->isFlush())
+        latency = 60000;
+    else
+        latency = cyclesToTicks(
                         m_controller->mandatoryQueueLatency(secondary_type));
     assert(latency > 0);
 

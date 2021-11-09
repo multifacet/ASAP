@@ -15,9 +15,9 @@ fi
 
 if ! [[ "$1" =~ ^(dash_lh|dash_ex|recipe_art|recipe_clht|recipe_masstree)$ ]]
 then
-    image=part1.img;
+    image=baseline1.img;
 else
-    image=part2.img;
+    image=baseline2.img;
 fi
 
 if [ "$1" == "memcached" ]
@@ -27,4 +27,4 @@ else
     cores=5
 fi
 
-sudo build/X86/gem5.fast -d results/ideal/$1 configs/example/fs.py --pmem --pmem-pwq --persist-buffers --pmem-wr-latency=60ns --mem-size=48GB --cpu-type=X86KvmCPU --kernel=/mydata/vmlinux_12 --disk-image=$image --ruby --asap -n $cores --script=scripts/$1.rcS
+sudo build/X86/gem5.fast -d results/baseline/$1 configs/example/fs.py --pmem --pmem-pwq --persist-buffers --pmem-wr-latency=60ns --mem-size=48GB --cpu-type=X86KvmCPU --kernel=/mydata/vmlinux_12 --disk-image=$image --ruby --asap -n $cores --script=scripts/$1.rcS
