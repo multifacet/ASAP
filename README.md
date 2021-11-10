@@ -12,7 +12,7 @@ This readme aims to help in the installation, compilation and execution of this 
 
 1. Install gem5 dependencies.
     ```sh
-    sudo apt install build-essentialgit m4 scons zlib1g zlib1g-dev libprotobuf-dev python protobuf-compiler libgoogle-perftools-dev libprotoc-dev libboost-all-dev pkg-config
+    sudo apt install build-essentialgit m4 scons zlib1g zlib1g-dev libprotobuf-dev python python-dev protobuf-compiler libgoogle-perftools-dev libprotoc-dev libboost-all-dev pkg-config
     ```
     
 2. Clone this repository.
@@ -30,6 +30,15 @@ This readme aims to help in the installation, compilation and execution of this 
     wget -r -np -nd -A "*.img" http://pages.cs.wisc.edu/~sujayyadalam/asap/images
     cd ..
     ```
+3. While running on Ubuntu 20.04, certain Python 2 needs to be installed. For this, we would require pip2.
+   ```sh
+   wget https://bootstrap.pypa.io/pip/2.7/get-pip.py
+   python2 get-pip.py
+   ```
+   Install `six` module.
+   ```sh
+   python2 -m pip install six
+   ```
     
 ## Building gem5
 
