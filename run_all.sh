@@ -1,6 +1,18 @@
 #!/bin/bash
 
-pModel=arp
+if [ $# -eq 0 ]
+then
+    echo "Usage: ./run_all.sh persistency_model[arp|epoch]"
+    exit
+fi
+
+if ! [[ "$1" =~ ^(arp|epoch)$ ]]
+then
+    echo "Invalid persistency_model. Choose from [arp|epoch]"
+    exit
+fi
+
+pModel=$1
 
 tmux new -d -s hops_$pModel "./run.sh nstore $pModel; read" \;\
     new-window -d "./run.sh echo $pModel; read" \; next-window \;\
