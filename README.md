@@ -30,7 +30,7 @@ This readme aims to help in the installation, compilation and execution of this 
     wget -r -np -nd -A "*.img" http://pages.cs.wisc.edu/~sujayyadalam/asap/images
     cd ..
     ```
-3. While running on Ubuntu 20.04, certain Python 2 needs to be installed. For this, we would require pip2.
+3. While running on Ubuntu 20.04, certain Python 2 modules needs to be installed. For this, we would require pip2.
    ```sh
    wget https://bootstrap.pypa.io/pip/2.7/get-pip.py
    python2 get-pip.py
@@ -68,6 +68,12 @@ This readme aims to help in the installation, compilation and execution of this 
  If you wish to run all the workloads in parallel, you could use the `run_all.sh` script. Note that this would require atleast 16 cores and 150GB for memory.
  
     ./run_all.sh
+    
+ ## Reproducing results from the paper
+ 
+ To reproduce the performance comparison results presented in the graph, you could use the `reproduce_results.py`. Invoke this script after you have completed all the experiments, i.e. all workloads with all models.
+ 
+    ./reproduce_results.py
  
  # License
  
