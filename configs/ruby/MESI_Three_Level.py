@@ -50,10 +50,10 @@ def define_options(parser):
     parser.add_option("--num-clusters", type = "int", default = 1,
             help = "number of clusters in a design in which there are shared\
             caches private to clusters")
-    parser.add_option("--l0i_size", type="string", default="4096B")
-    parser.add_option("--l0d_size", type="string", default="4096B")
-    parser.add_option("--l0i_assoc", type="int", default=1)
-    parser.add_option("--l0d_assoc", type="int", default=1)
+    parser.add_option("--l0i_size", type="string", default="32kB")
+    parser.add_option("--l0d_size", type="string", default="32kB")
+    parser.add_option("--l0i_assoc", type="int", default=8)
+    parser.add_option("--l0d_assoc", type="int", default=8)
     parser.add_option("--l0_transitions_per_cycle", type="int", default=32)
     parser.add_option("--l1_transitions_per_cycle", type="int", default=32)
     parser.add_option("--l2_transitions_per_cycle", type="int", default=4)
